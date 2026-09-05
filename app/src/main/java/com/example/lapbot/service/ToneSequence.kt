@@ -15,30 +15,30 @@ internal data class ToneSequence(
 )
 
 internal fun buildToneSequence(state: TimingUiState, expectedLap: Int? = null): ToneSequence? {
+  if (!state.toneSettings.enabled) return null
   val selected = state.rows.firstOrNull { canonicalKartNumber(it.number) == state.selectedKartNumber } ?: return null
   val metricLaps = selected.metricLapsSince(state.metricsSinceLap)
   val latest = metricLaps.firstOrNull() ?: return null
   if (expectedLap != null && latest.lap != expectedLap) return null
   val target = metricLap(state, selected, latest, metricLaps) ?: return null
   val settings = state.toneSettings
-  return ToneSequence(
-    frequenciesHz =
-      listOf(
-        REFERENCE_HZ,
-        comparisonFrequency(latest.lapMs, target.lapMs),
-        comparisonFrequency(latest.sector1Ms, target.sector1Ms),
-        comparisonFrequency(latest.sector2Ms, target.sector2Ms),
-        comparisonFrequency(latest.sector3Ms, target.sector3Ms),
-      ),
-    durationsMs =
-      listOf(
-        settings.referenceDurationMs,
-        settings.lapDurationMs,
-        settings.sectorDurationMs,
-        settings.sectorDurationMs,
-        settings.sectorDurationMs,
-      ),
-  )
+  val frequencies =
+    buildList {
+      add(REFERENCE_HZ)
+      add(comparisonFrequency(latest.lapMs, target.lapMs))
+      if (state.supportsSectors) {
+        add(comparisonFrequency(latest.sector1Ms, target.sector1Ms))
+        add(comparisonFrequency(latest.sector2Ms, target.sector2Ms))
+        add(comparisonFrequency(latest.sector3Ms, target.sector3Ms))
+      }
+    }
+  val durations =
+    buildList {
+      add(settings.referenceDurationMs)
+      add(settings.lapDurationMs)
+      if (state.supportsSectors) repeat(3) { add(settings.sectorDurationMs) }
+    }
+  return ToneSequence(frequenciesHz = frequencies, durationsMs = durations)
 }
 
 private fun metricLap(
@@ -49,7 +49,18 @@ private fun metricLap(
 ): LapHistoryEntry? =
   when (state.toneSettings.metric) {
     ToneMetric.PreviousLap -> metricLaps.getOrNull(1)
-    ToneMetric.DriverBest -> metricLaps.drop(1).minByOrNull(LapHistoryEntry::lapMs)
+    ToneMetric.DriverBest ->
+      if (state.metricsSinceLap == null && selected.bestLapMs != null && selected.bestLapMs != latest.lapMs) {
+        LapHistoryEntry(
+          lap = selected.bestLap ?: 0,
+          lapMs = selected.bestLapMs,
+          sector1Ms = selected.bestLapSector1Ms,
+          sector2Ms = selected.bestLapSector2Ms,
+          sector3Ms = selected.bestLapSector3Ms,
+        )
+      } else {
+        metricLaps.drop(1).minByOrNull(LapHistoryEntry::lapMs)
+      }
     ToneMetric.TheoreticalBest -> {
       val previousLaps = metricLaps.drop(1)
       val sector1 = previousLaps.mapNotNull(LapHistoryEntry::sector1Ms).minOrNull()

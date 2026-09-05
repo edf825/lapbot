@@ -1,11 +1,13 @@
 package com.example.lapbot.ui.main
 
+import android.content.pm.ApplicationInfo
 import androidx.compose.foundation.background
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,12 +23,18 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -41,7 +49,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusManager
 import androidx.compose.ui.graphics.Color
@@ -54,18 +64,26 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.disabled
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.lapbot.data.ConnectionStatus
+import com.example.lapbot.data.AnnouncementSettings
+import com.example.lapbot.data.AnnouncementVoiceGender
 import com.example.lapbot.data.LapHistoryEntry
 import com.example.lapbot.data.LapTimelineEntry
 import com.example.lapbot.data.ReconnectPolicy
 import com.example.lapbot.data.TimingRow
 import com.example.lapbot.data.TimingServiceRepository
+import com.example.lapbot.data.TimingTrack
+import com.example.lapbot.data.TimingTracks
 import com.example.lapbot.data.TimingUiState
 import com.example.lapbot.data.ToneMetric
 import com.example.lapbot.data.ToneSettings
+import com.example.lapbot.service.formatSpokenDeltaMagnitude
 import com.example.lapbot.data.canonicalKartNumber
 import com.example.lapbot.data.metricLapsSince
 import com.example.lapbot.theme.LapbotTheme
@@ -73,63 +91,115 @@ import kotlin.math.roundToInt
 import kotlin.math.absoluteValue
 
 @Composable
-fun MainScreen(
+fun LiveTimingsScreen(
   onDriverClick: (String) -> Unit,
-  onAnnouncementsClick: () -> Unit,
+  onRaceEngineerClick: () -> Unit,
   modifier: Modifier = Modifier,
 ) {
+  val context = LocalContext.current
   val viewModel = timingViewModel()
   val state by viewModel.uiState.collectAsStateWithLifecycle()
-  MainScreen(
+  LiveTimingsScreen(
     state = state,
     onConnect = viewModel::connect,
+    onStartDemo = viewModel::startDemo,
+    demoEnabled = context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0,
     onDisconnect = viewModel::disconnect,
     onAutoReconnectChange = viewModel::setAutoReconnect,
     onTailLimitChange = viewModel::setTailLimit,
     onReconnectPolicyChange = viewModel::setReconnectPolicy,
     onDriverClick = onDriverClick,
-    onAnnouncementsClick = onAnnouncementsClick,
+    onRaceEngineerClick = onRaceEngineerClick,
     modifier = modifier,
   )
 }
 
 @Composable
-internal fun MainScreen(
+@OptIn(ExperimentalMaterial3Api::class)
+internal fun LiveTimingsScreen(
   state: TimingUiState,
-  onConnect: () -> Unit,
+  onConnect: (String) -> Unit,
+  onStartDemo: () -> Unit = {},
+  demoEnabled: Boolean = false,
   onDisconnect: () -> Unit,
   onAutoReconnectChange: (Boolean) -> Unit,
   onTailLimitChange: (Int) -> Unit,
   onReconnectPolicyChange: (ReconnectPolicy) -> Unit,
   onDriverClick: (String) -> Unit,
-  onAnnouncementsClick: () -> Unit,
+  onRaceEngineerClick: () -> Unit,
   modifier: Modifier = Modifier,
 ) {
+  var selectedTrackId by rememberSaveable {
+    mutableStateOf(state.selectedTrackId ?: if (state.isDemo) TimingTracks.BuckmorePark.id else null)
+  }
+  val selectedTrack = TimingTracks.find(selectedTrackId)
   var showConfiguration by remember { mutableStateOf(false) }
+  var showDebugTools by remember { mutableStateOf(false) }
+  var pendingAutoReconnect by remember { mutableStateOf(state.autoReconnect) }
   var pendingTailLimit by remember { mutableFloatStateOf(state.tailLimit.toFloat()) }
   var pendingInitialDelaySeconds by remember { mutableFloatStateOf(state.reconnectPolicy.initialDelayMs / 1_000f) }
   var pendingMaxDelaySeconds by remember { mutableFloatStateOf(state.reconnectPolicy.maxDelayMs / 1_000f) }
   var pendingGiveUpMinutes by remember { mutableFloatStateOf(state.reconnectPolicy.giveUpAfterMs / 60_000f) }
-  Column(modifier = modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-    ConnectionPanel(
-      state = state,
-      onConnect = onConnect,
-      onDisconnect = onDisconnect,
-      onAutoReconnectChange = onAutoReconnectChange,
-      onAnnouncementsClick = onAnnouncementsClick,
-      onConfigure = {
-        pendingTailLimit = state.tailLimit.toFloat()
-        pendingInitialDelaySeconds = state.reconnectPolicy.initialDelayMs / 1_000f
-        pendingMaxDelaySeconds = state.reconnectPolicy.maxDelayMs / 1_000f
-        pendingGiveUpMinutes = state.reconnectPolicy.giveUpAfterMs / 60_000f
-        showConfiguration = true
-      },
-    )
-    TimingTable(state.rows, onDriverClick, Modifier.weight(1.15f))
-    JsonTail(state.jsonTail, Modifier.weight(0.85f))
+  Box(modifier = modifier.fillMaxSize()) {
+    Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+      ConnectionPanel(
+        state = state,
+        selectedTrack = selectedTrack,
+        onTrackSelected = { track ->
+          selectedTrackId = track.id
+          onConnect(track.id)
+        },
+        onRetry = { selectedTrack?.let { onConnect(it.id) } },
+        demoEnabled = demoEnabled,
+        onDisconnect = {
+          selectedTrackId = null
+          onDisconnect()
+        },
+        onShowDebugTools = { showDebugTools = true },
+        onConfigure = {
+          pendingAutoReconnect = state.autoReconnect
+          pendingTailLimit = state.tailLimit.toFloat()
+          pendingInitialDelaySeconds = state.reconnectPolicy.initialDelayMs / 1_000f
+          pendingMaxDelaySeconds = state.reconnectPolicy.maxDelayMs / 1_000f
+          pendingGiveUpMinutes = state.reconnectPolicy.giveUpAfterMs / 60_000f
+          showConfiguration = true
+        },
+      )
+      TimingTable(
+        rows = state.rows,
+        supportsSectors = selectedTrack?.supportsSectors ?: state.supportsSectors,
+        onDriverClick = onDriverClick,
+        emptyMessage =
+          when {
+            selectedTrack == null -> "Select a track to load live timing."
+            state.status == ConnectionStatus.Connecting -> "Connecting to ${selectedTrack.label}…"
+            state.status == ConnectionStatus.Reconnecting -> "Restoring the ${selectedTrack.label} connection…"
+            state.status == ConnectionStatus.Connected -> "Connected. Waiting for an active timing session."
+            else -> "Connection stopped. Retry when you're ready."
+          },
+        modifier = Modifier.weight(1f),
+      )
+    }
+    val engineerEnabled = state.status == ConnectionStatus.Connected
+    ExtendedFloatingActionButton(
+      onClick = { if (engineerEnabled) onRaceEngineerClick() },
+      modifier =
+        Modifier.align(Alignment.BottomEnd).padding(16.dp)
+          .semantics { if (!engineerEnabled) disabled() },
+      containerColor =
+        if (engineerEnabled) MaterialTheme.colorScheme.primary
+        else MaterialTheme.colorScheme.surfaceVariant,
+      contentColor =
+        if (engineerEnabled) MaterialTheme.colorScheme.onPrimary
+        else MaterialTheme.colorScheme.onSurfaceVariant,
+    ) {
+      Text("Race Engineer")
+    }
   }
   if (showConfiguration) {
     ConfigurationDialog(
+      autoReconnect = pendingAutoReconnect,
+      onAutoReconnectChange = { pendingAutoReconnect = it },
       tailLimit = pendingTailLimit,
       onTailLimitChange = { pendingTailLimit = it },
       initialDelaySeconds = pendingInitialDelaySeconds,
@@ -139,6 +209,7 @@ internal fun MainScreen(
       giveUpMinutes = pendingGiveUpMinutes,
       onGiveUpChange = { pendingGiveUpMinutes = it },
       onApply = {
+        onAutoReconnectChange(pendingAutoReconnect)
         onTailLimitChange(pendingTailLimit.roundToInt())
         onReconnectPolicyChange(
           ReconnectPolicy(
@@ -150,6 +221,18 @@ internal fun MainScreen(
         showConfiguration = false
       },
       onDismiss = { showConfiguration = false },
+    )
+  }
+  if (showDebugTools) {
+    DebugToolsDialog(
+      canStartReplay = state.status == ConnectionStatus.Disconnected,
+      jsonTail = state.jsonTail,
+      onStartReplay = {
+        showDebugTools = false
+        selectedTrackId = TimingTracks.BuckmorePark.id
+        onStartDemo()
+      },
+      onDismiss = { showDebugTools = false },
     )
   }
 }
@@ -168,85 +251,50 @@ fun DriverScreen(
     PageHeader("Driver", onBack)
     Text(driver?.displayName ?: "Driver unavailable", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
     MetricWindowControl(state.metricsSinceLap, viewModel::setMetricsSinceLap)
-    DriverComparisonTable(state.rows, driver, state.metricsSinceLap)
-    LapHistoryTable(driver?.lapTimeline.orEmpty(), Modifier.weight(1f))
+    DriverComparisonTable(state.rows, driver, state.metricsSinceLap, state.supportsSectors)
+    LapHistoryTable(driver?.lapTimeline.orEmpty(), Modifier.weight(1f), supportsSectors = state.supportsSectors)
   }
 }
 
 @Composable
-fun AnnouncementScreen(
+fun EngineerSettingsScreen(
   onBack: () -> Unit,
   modifier: Modifier = Modifier,
 ) {
   val viewModel = timingViewModel()
   val state by viewModel.uiState.collectAsStateWithLifecycle()
-  val drivers = state.rows.filter { canonicalKartNumber(it.number) != null }.sortedByKartNumber()
-  val selected = drivers.firstOrNull { canonicalKartNumber(it.number) == state.selectedKartNumber }
+  val selected = state.rows.firstOrNull { canonicalKartNumber(it.number) == state.selectedKartNumber }
   val focusManager = LocalFocusManager.current
-  var expanded by remember { mutableStateOf(false) }
-  var showKartEntry by remember { mutableStateOf(false) }
   var showToneConfiguration by remember { mutableStateOf(false) }
 
-  Column(modifier.clearFocusOnTap(focusManager).fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-    PageHeader("Announcements", onBack)
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-      Box {
-        OutlinedButton(onClick = { expanded = true }) {
-          Text(
-            selected?.displayName
-              ?: state.selectedKartNumber?.let { "#$it Waiting" }
-              ?: "Select kart",
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-          )
-        }
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-          DropdownMenuItem(
-            text = { Text("Enter kart number...") },
-            onClick = {
-              expanded = false
-              showKartEntry = true
-            },
-          )
-          if (drivers.isNotEmpty()) HorizontalDivider()
-          drivers.forEach { driver ->
-            DropdownMenuItem(
-              text = { Text(driver.displayName) },
-              onClick = {
-                viewModel.setSelectedKartNumber(driver.number)
-                expanded = false
-              },
-            )
-          }
-        }
-      }
-      Row {
-        Switch(checked = state.audioAnnouncements, onCheckedChange = viewModel::setAudioAnnouncements)
-        Text("Speak laps", modifier = Modifier.padding(start = 5.dp, top = 13.dp), style = MaterialTheme.typography.bodySmall)
-      }
-    }
+  Column(
+    modifier.clearFocusOnTap(focusManager).fillMaxSize().verticalScroll(rememberScrollState()),
+    verticalArrangement = Arrangement.spacedBy(10.dp),
+  ) {
+    PageHeader("Engineer Settings", onBack, backLabel = "Race Engineer")
+    Text(
+      selected?.displayName ?: state.selectedKartNumber?.let { "Kart #$it" } ?: "No driver in focus",
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+      style = MaterialTheme.typography.bodyMedium,
+    )
+    AnnouncementComparisonControls(
+      settings = state.announcementSettings,
+      supportsSectors = state.supportsSectors,
+      onSettingsChange = viewModel::setAnnouncementSettings,
+      onPreview = viewModel::previewAnnouncement,
+    )
     MetricWindowControl(state.metricsSinceLap, viewModel::setMetricsSinceLap)
     ToneControls(
       settings = state.toneSettings,
+      supportsSectors = state.supportsSectors,
       onSettingsChange = viewModel::setToneSettings,
       onConfigure = { showToneConfiguration = true },
-    )
-    DriverComparisonTable(state.rows, selected, state.metricsSinceLap)
-    LapHistoryTable(selected?.lapTimeline.orEmpty(), Modifier.weight(1f))
-  }
-  if (showKartEntry) {
-    KartNumberDialog(
-      initialValue = state.selectedKartNumber.orEmpty(),
-      onApply = {
-        viewModel.setSelectedKartNumber(it)
-        showKartEntry = false
-      },
-      onDismiss = { showKartEntry = false },
     )
   }
   if (showToneConfiguration) {
     ToneConfigurationDialog(
       settings = state.toneSettings,
+      supportsSectors = state.supportsSectors,
       testEnabled = selected != null,
       onApply = {
         viewModel.setToneSettings(it)
@@ -262,11 +310,312 @@ fun AnnouncementScreen(
 }
 
 @Composable
+fun RaceEngineerScreen(
+  onBack: () -> Unit,
+  onSettingsClick: () -> Unit,
+  onPitlaneModeClick: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  val viewModel = timingViewModel()
+  val state by viewModel.uiState.collectAsStateWithLifecycle()
+  RaceEngineerScreen(
+    state = state,
+    onBack = onBack,
+    onSelectedKartNumberChange = viewModel::setSelectedKartNumber,
+    onRadioMessagesChange = viewModel::setCoachEnabled,
+    onSettingsClick = onSettingsClick,
+    onPitlaneModeClick = onPitlaneModeClick,
+    modifier = modifier,
+  )
+}
+
+@Composable
+internal fun RaceEngineerScreen(
+  state: TimingUiState,
+  onBack: () -> Unit,
+  onSelectedKartNumberChange: (String?) -> Unit,
+  onRadioMessagesChange: (Boolean) -> Unit,
+  onSettingsClick: () -> Unit,
+  onPitlaneModeClick: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  val hasDriverInFocus = canonicalKartNumber(state.selectedKartNumber) != null
+  Column(
+    modifier.clearFocusOnTap(LocalFocusManager.current).fillMaxSize(),
+    verticalArrangement = Arrangement.spacedBy(12.dp),
+  ) {
+    PageHeader("Race Engineer", onBack)
+    DriverFocusControl(state, onSelectedKartNumberChange)
+    Row(
+      Modifier.fillMaxWidth()
+        .toggleable(
+          value = state.coachEnabled,
+          role = Role.Switch,
+          onValueChange = onRadioMessagesChange,
+        )
+        .padding(vertical = 8.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Column(Modifier.weight(1f)) {
+        Text("Engineer Radio Messages", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+        Text(
+          if (state.coachEnabled) "Spoken timing and coaching feedback is on" else "Radio messages are off",
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          style = MaterialTheme.typography.bodySmall,
+        )
+      }
+      Switch(checked = state.coachEnabled, onCheckedChange = null)
+    }
+    OutlinedButton(onClick = onSettingsClick, modifier = Modifier.fillMaxWidth()) {
+      Text("Engineer Settings")
+    }
+    Button(onClick = onPitlaneModeClick, enabled = hasDriverInFocus, modifier = Modifier.fillMaxWidth()) {
+      Text("Pitlane Mode")
+    }
+    if (!hasDriverInFocus) {
+      Text(
+        "Pick a driver in focus to enable Pitlane Mode.",
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        style = MaterialTheme.typography.bodySmall,
+      )
+    }
+  }
+}
+
+@Composable
+fun PitlaneModeScreen(
+  onBack: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  val viewModel = timingViewModel()
+  val state by viewModel.uiState.collectAsStateWithLifecycle()
+  PitlaneModeScreen(state = state, onBack = onBack, modifier = modifier)
+}
+
+@Composable
+internal fun PitlaneModeScreen(
+  state: TimingUiState,
+  onBack: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  val selected = state.rows.firstOrNull { canonicalKartNumber(it.number) == state.selectedKartNumber }
+
+  Column(modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    PageHeader("Pitlane Mode", onBack, backLabel = "Race Engineer")
+    Text(
+      "${TimingTracks.find(state.selectedTrackId)?.label ?: "Live timing"} · ${state.status.label}",
+      color = MaterialTheme.colorScheme.primary,
+      style = MaterialTheme.typography.labelLarge,
+    )
+    if (selected == null) {
+      Text(
+        state.selectedKartNumber?.let { "Waiting for kart #$it to appear in live timing." }
+          ?: "Return to Race Engineer and choose a driver in focus.",
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+      )
+    } else {
+      Text(selected.displayName, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+      if (state.supportsSectors) CoachingObjectiveCard(state.coachingObjective)
+      DriverComparisonTable(state.rows, selected, state.metricsSinceLap, state.supportsSectors)
+      LapHistoryTable(selected.lapTimeline, Modifier.weight(1f), supportsSectors = state.supportsSectors)
+    }
+  }
+}
+
+@Composable
+private fun DriverFocusControl(
+  state: TimingUiState,
+  onSelectedKartNumberChange: (String?) -> Unit,
+) {
+  val drivers = state.rows.filter { canonicalKartNumber(it.number) != null }.sortedByKartNumber()
+  val selected = drivers.firstOrNull { canonicalKartNumber(it.number) == state.selectedKartNumber }
+  var driverMenuExpanded by remember { mutableStateOf(false) }
+  var showKartEntry by remember { mutableStateOf(false) }
+
+  Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    Text("Driver in Focus", style = MaterialTheme.typography.labelLarge)
+    Box {
+      OutlinedButton(onClick = { driverMenuExpanded = true }, modifier = Modifier.fillMaxWidth()) {
+        Text(
+          selected?.displayName
+            ?: state.selectedKartNumber?.let { "#$it Waiting" }
+            ?: "Enter kart number / pick from list",
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+        )
+      }
+      DropdownMenu(expanded = driverMenuExpanded, onDismissRequest = { driverMenuExpanded = false }) {
+        DropdownMenuItem(
+          text = { Text("Enter kart number...") },
+          onClick = {
+            driverMenuExpanded = false
+            showKartEntry = true
+          },
+        )
+        if (drivers.isNotEmpty()) HorizontalDivider()
+        drivers.forEach { driver ->
+          DropdownMenuItem(
+            text = { Text(driver.displayName) },
+            onClick = {
+              onSelectedKartNumberChange(driver.number)
+              driverMenuExpanded = false
+            },
+          )
+        }
+      }
+    }
+  }
+  if (showKartEntry) {
+    KartNumberDialog(
+      initialValue = state.selectedKartNumber.orEmpty(),
+      onApply = {
+        onSelectedKartNumberChange(it)
+        showKartEntry = false
+      },
+      onDismiss = { showKartEntry = false },
+    )
+  }
+}
+
+@Composable
+private fun CoachingObjectiveCard(objective: com.example.lapbot.data.CoachingObjectiveUiState) {
+  Card(Modifier.fillMaxWidth()) {
+    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+      Text("Session objective", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+      if (objective.status == com.example.lapbot.data.CoachingObjectiveStatus.CollectingData) {
+        Text("Collecting representative sector data", color = MaterialTheme.colorScheme.onSurfaceVariant)
+      } else {
+        Text("Sector ${objective.sector ?: "—"}")
+        objective.opportunityMs?.let {
+          Text(
+            "Opportunity: ${formatSpokenDeltaMagnitude(it)}",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+          )
+        }
+        Text(
+          objective.status.objectiveStatusLabel(),
+          color = MaterialTheme.colorScheme.primary,
+          style = MaterialTheme.typography.labelMedium,
+        )
+      }
+    }
+  }
+}
+
+private fun com.example.lapbot.data.CoachingObjectiveStatus.objectiveStatusLabel(): String =
+  when (this) {
+    com.example.lapbot.data.CoachingObjectiveStatus.CollectingData -> "Collecting data"
+    com.example.lapbot.data.CoachingObjectiveStatus.Identified -> "Focus identified"
+    com.example.lapbot.data.CoachingObjectiveStatus.Working -> "Working"
+    com.example.lapbot.data.CoachingObjectiveStatus.PromisingImprovement -> "Improving"
+    com.example.lapbot.data.CoachingObjectiveStatus.ImprovementConfirmed -> "Pace becoming consistent"
+    com.example.lapbot.data.CoachingObjectiveStatus.ReadyToReassess -> "Ready to reassess"
+  }
+
+@Composable
+private fun AnnouncementComparisonControls(
+  settings: AnnouncementSettings,
+  supportsSectors: Boolean,
+  onSettingsChange: (AnnouncementSettings) -> Unit,
+  onPreview: () -> Unit,
+) {
+  Column(Modifier.fillMaxWidth()) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+      Text("Speak last comparison", modifier = Modifier.padding(top = 13.dp), style = MaterialTheme.typography.bodySmall)
+      Switch(
+        checked = settings.speakLastComparison,
+        onCheckedChange = { onSettingsChange(settings.copy(speakLastComparison = it)) },
+      )
+    }
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+      Text("Speak best comparison", modifier = Modifier.padding(top = 13.dp), style = MaterialTheme.typography.bodySmall)
+      Switch(
+        checked = settings.speakBestComparison,
+        onCheckedChange = { onSettingsChange(settings.copy(speakBestComparison = it)) },
+      )
+    }
+    if (supportsSectors) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+      Column(Modifier.weight(1f).padding(top = 8.dp)) {
+        Text("Speak sector timing", style = MaterialTheme.typography.bodySmall)
+        Text(
+          "Numeric time starts 1 second after the sound",
+          style = MaterialTheme.typography.labelSmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+      }
+      Switch(
+        checked = settings.speakSectorDeltas,
+        onCheckedChange = { onSettingsChange(settings.copy(speakSectorDeltas = it)) },
+      )
+    }
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+      Column(Modifier.weight(1f).padding(top = 8.dp)) {
+        Text(if (supportsSectors) "Sector tones" else "Lap tones", style = MaterialTheme.typography.bodySmall)
+        Text(
+          if (supportsSectors) "Play a cue before sector and lap calls" else "Play a cue before lap calls",
+          style = MaterialTheme.typography.labelSmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+      }
+      Switch(
+        checked = settings.sectorTonesEnabled,
+        onCheckedChange = { onSettingsChange(settings.copy(sectorTonesEnabled = it)) },
+      )
+    }
+    if (supportsSectors) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+      Column(Modifier.weight(1f).padding(top = 8.dp)) {
+        Text("Speak coaching", style = MaterialTheme.typography.bodySmall)
+        Text(
+          "Session-aware objectives, trends, and progress",
+          style = MaterialTheme.typography.labelSmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+      }
+      Switch(
+        checked = settings.speakCoaching,
+        onCheckedChange = { onSettingsChange(settings.copy(speakCoaching = it)) },
+      )
+    }
+    if (supportsSectors) Text("Coaching detail", style = MaterialTheme.typography.bodySmall)
+    if (supportsSectors) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      com.example.lapbot.data.CoachingChattiness.entries.forEach { level ->
+        FilterChip(
+          selected = settings.coachingChattiness == level,
+          onClick = { onSettingsChange(settings.copy(coachingChattiness = level)) },
+          label = { Text(level.name) },
+        )
+      }
+    }
+    Text("Voice", style = MaterialTheme.typography.bodySmall)
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      AnnouncementVoiceGender.entries.forEach { gender ->
+        FilterChip(
+          selected = settings.voiceGender == gender,
+          onClick = { onSettingsChange(settings.copy(voiceGender = gender)) },
+          label = { Text(gender.name) },
+        )
+      }
+    }
+    Text(
+      "Voice speed ${(settings.speechRate * 100).roundToInt()}%",
+      style = MaterialTheme.typography.bodySmall,
+    )
+    Slider(
+      value = settings.speechRate,
+      onValueChange = { onSettingsChange(settings.copy(speechRate = it)) },
+      valueRange = 0.8f..1.1f,
+    )
+    OutlinedButton(onClick = onPreview) { Text("Preview announcement") }
+  }
+}
+
+@Composable
 private fun KartNumberDialog(initialValue: String, onApply: (String) -> Unit, onDismiss: () -> Unit) {
   var value by remember(initialValue) { mutableStateOf(initialValue) }
   AlertDialog(
     onDismissRequest = onDismiss,
-    title = { Text("Announcer kart") },
+    title = { Text("Select driver by kart") },
     text = {
       OutlinedTextField(
         value = value,
@@ -287,10 +636,10 @@ private fun Modifier.clearFocusOnTap(focusManager: FocusManager): Modifier =
   pointerInput(focusManager) { detectTapGestures { focusManager.clearFocus() } }
 
 @Composable
-private fun PageHeader(title: String, onBack: () -> Unit) {
-  Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+private fun PageHeader(title: String, onBack: () -> Unit, backLabel: String = "Live Timings") {
+  Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+    TextButton(onClick = onBack) { Text("‹ $backLabel") }
     Text(title, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-    TextButton(onClick = onBack) { Text("Race") }
   }
 }
 
@@ -299,6 +648,7 @@ private fun DriverComparisonTable(
   rows: List<TimingRow>,
   selected: TimingRow?,
   sinceLap: Int?,
+  supportsSectors: Boolean,
 ) {
   val horizontalScroll = rememberScrollState()
 
@@ -312,6 +662,9 @@ private fun DriverComparisonTable(
     val latest = metricLaps.firstOrNull()
     val previous = metricLaps.getOrNull(1)
     val driverBest = metricLaps.minByOrNull(LapHistoryEntry::lapMs)
+    val driverBestTime =
+      if (sinceLap == null) selected.bestLapMs ?: driverBest?.lapMs
+      else driverBest?.lapMs
     val bestSector1 = metricLaps.mapNotNull(LapHistoryEntry::sector1Ms).minOrNull()
     val bestSector2 = metricLaps.mapNotNull(LapHistoryEntry::sector2Ms).minOrNull()
     val bestSector3 = metricLaps.mapNotNull(LapHistoryEntry::sector3Ms).minOrNull()
@@ -341,8 +694,8 @@ private fun DriverComparisonTable(
         LapComparison(
           "Driver best",
           selected,
-          driverBest?.lap,
-          driverBest?.lapMs,
+          if (sinceLap == null) selected.bestLap ?: driverBest?.lap else driverBest?.lap,
+          driverBestTime,
           driverBest?.sector1Ms,
           driverBest?.sector2Ms,
           driverBest?.sector3Ms,
@@ -374,10 +727,10 @@ private fun DriverComparisonTable(
           bestRecent?.recentCompletedSector2Ms,
           bestRecent?.recentCompletedSector3Ms,
         ),
-      )
-    FocusHeader(horizontalScroll)
+      ).filterNot { !supportsSectors && it.label == "Theoretical" }
+    FocusHeader(horizontalScroll, supportsSectors)
     comparisons.forEach { comparison ->
-      FocusRow(comparison, latest, horizontalScroll)
+      FocusRow(comparison, latest, horizontalScroll, supportsSectors)
       HorizontalDivider()
     }
   }
@@ -420,28 +773,57 @@ private fun MetricWindowControl(sinceLap: Int?, onSinceLapChange: (Int?) -> Unit
 @Composable
 private fun ToneControls(
   settings: ToneSettings,
+  supportsSectors: Boolean,
   onSettingsChange: (ToneSettings) -> Unit,
   onConfigure: () -> Unit,
 ) {
   var expanded by remember { mutableStateOf(false) }
-  Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-    Text("Tone metric", modifier = Modifier.padding(top = 13.dp), style = MaterialTheme.typography.bodyMedium)
-    Row {
-      Box {
-        OutlinedButton(onClick = { expanded = true }) { Text(settings.metric.label) }
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-          ToneMetric.entries.forEach { metric ->
-            DropdownMenuItem(
-              text = { Text(metric.label) },
-              onClick = {
-                onSettingsChange(settings.copy(metric = metric))
-                expanded = false
-              },
-            )
+  Card(Modifier.fillMaxWidth()) {
+    Row(
+      Modifier.fillMaxWidth()
+        .toggleable(
+          value = settings.enabled,
+          role = Role.Switch,
+          onValueChange = { onSettingsChange(settings.copy(enabled = it)) },
+        )
+        .padding(horizontal = 16.dp, vertical = 10.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Column(Modifier.weight(1f)) {
+        Text("Performance tones", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+        Text(
+          if (settings.enabled) "Play comparison tones after each announced lap" else "Tone playback is off",
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          style = MaterialTheme.typography.bodySmall,
+        )
+      }
+      Switch(checked = settings.enabled, onCheckedChange = null)
+    }
+    HorizontalDivider()
+    Row(
+      Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+      horizontalArrangement = Arrangement.SpaceBetween,
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("Compare with", style = MaterialTheme.typography.bodySmall)
+        Spacer(Modifier.width(8.dp))
+        Box {
+          OutlinedButton(onClick = { expanded = true }, enabled = settings.enabled) { Text(settings.metric.label) }
+          DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            ToneMetric.entries.filterNot { !supportsSectors && it == ToneMetric.TheoreticalBest }.forEach { metric ->
+              DropdownMenuItem(
+                text = { Text(metric.label) },
+                onClick = {
+                  onSettingsChange(settings.copy(metric = metric))
+                  expanded = false
+                },
+              )
+            }
           }
         }
       }
-      TextButton(onClick = onConfigure) { Text("Tone config") }
+      TextButton(onClick = onConfigure) { Text("Configure") }
     }
   }
 }
@@ -449,16 +831,19 @@ private fun ToneControls(
 @Composable
 private fun ToneConfigurationDialog(
   settings: ToneSettings,
+  supportsSectors: Boolean,
   testEnabled: Boolean,
   onApply: (ToneSettings) -> Unit,
   onTest: (ToneSettings) -> Unit,
   onDismiss: () -> Unit,
 ) {
+  var enabled by remember(settings) { mutableStateOf(settings.enabled) }
   var referenceDuration by remember(settings) { mutableFloatStateOf(settings.referenceDurationMs.toFloat()) }
   var lapDuration by remember(settings) { mutableFloatStateOf(settings.lapDurationMs.toFloat()) }
   var sectorDuration by remember(settings) { mutableFloatStateOf(settings.sectorDurationMs.toFloat()) }
   val pending =
     settings.copy(
+      enabled = enabled,
       referenceDurationMs = referenceDuration.roundToDuration(),
       lapDurationMs = lapDuration.roundToDuration(),
       sectorDurationMs = sectorDuration.roundToDuration(),
@@ -468,10 +853,14 @@ private fun ToneConfigurationDialog(
     title = { Text("Tone configuration") },
     text = {
       Column {
-        DurationSlider("Reference tone", referenceDuration, { referenceDuration = it })
-        DurationSlider("Lap tone", lapDuration, { lapDuration = it })
-        DurationSlider("Sector tones", sectorDuration, { sectorDuration = it })
-        TextButton(onClick = { onTest(pending) }, enabled = testEnabled) { Text("Test latest lap") }
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+          Text("Tone playback", modifier = Modifier.weight(1f))
+          Switch(checked = enabled, onCheckedChange = { enabled = it })
+        }
+        DurationSlider("Reference tone", referenceDuration, enabled, { referenceDuration = it })
+        DurationSlider("Lap tone", lapDuration, enabled, { lapDuration = it })
+        if (supportsSectors) DurationSlider("Sector tones", sectorDuration, enabled, { sectorDuration = it })
+        TextButton(onClick = { onTest(pending) }, enabled = testEnabled && enabled) { Text("Test latest lap") }
       }
     },
     confirmButton = { TextButton(onClick = { onApply(pending) }) { Text("Apply") } },
@@ -480,9 +869,9 @@ private fun ToneConfigurationDialog(
 }
 
 @Composable
-private fun DurationSlider(label: String, duration: Float, onDurationChange: (Float) -> Unit) {
+private fun DurationSlider(label: String, duration: Float, enabled: Boolean, onDurationChange: (Float) -> Unit) {
   Text("$label: ${duration.roundToDuration()} ms")
-  Slider(value = duration, onValueChange = onDurationChange, valueRange = 50f..1_000f, steps = 18)
+  Slider(value = duration, onValueChange = onDurationChange, enabled = enabled, valueRange = 50f..1_000f, steps = 18)
 }
 
 private fun Float.roundToDuration(): Int = (roundToInt() / 50 * 50).coerceIn(50, 1_000)
@@ -498,31 +887,53 @@ private val ToneMetric.label: String
     }
 
 @Composable
-private fun LapHistoryTable(history: List<LapTimelineEntry>, modifier: Modifier = Modifier) {
+private fun LapHistoryTable(
+  history: List<LapTimelineEntry>,
+  modifier: Modifier = Modifier,
+  scrollable: Boolean = true,
+  supportsSectors: Boolean = true,
+) {
   Column(modifier.fillMaxWidth()) {
     Text("Lap history", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
     Spacer(Modifier.height(5.dp))
     Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant).padding(vertical = 4.dp)) {
       HistoryCell("LAP", 40, true)
       HistoryCell("TIME", 90, true)
-      HistoryCell("S1", 70, true)
-      HistoryCell("S2", 70, true)
-      HistoryCell("S3", 70, true)
+      if (supportsSectors) {
+        HistoryCell("S1", 70, true)
+        HistoryCell("S2", 70, true)
+        HistoryCell("S3", 70, true)
+      }
     }
     if (history.isEmpty()) {
       Text("No laps available.", modifier = Modifier.padding(8.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
-    } else {
+    } else if (scrollable) {
       LazyColumn(Modifier.fillMaxSize()) {
         items(history, key = LapTimelineEntry::lap) { lap ->
           Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
             HistoryCell(lap.lap.toString(), 40)
             HistoryCell(formatMillis(lap.lapMs), 90)
+            if (supportsSectors) {
+              HistoryCell(formatMillis(lap.sector1Ms), 70)
+              HistoryCell(formatMillis(lap.sector2Ms), 70)
+              HistoryCell(formatMillis(lap.sector3Ms), 70)
+            }
+          }
+          HorizontalDivider()
+        }
+      }
+    } else {
+      history.forEach { lap ->
+        Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+          HistoryCell(lap.lap.toString(), 40)
+          HistoryCell(formatMillis(lap.lapMs), 90)
+          if (supportsSectors) {
             HistoryCell(formatMillis(lap.sector1Ms), 70)
             HistoryCell(formatMillis(lap.sector2Ms), 70)
             HistoryCell(formatMillis(lap.sector3Ms), 70)
           }
-          HorizontalDivider()
         }
+        HorizontalDivider()
       }
     }
   }
@@ -540,13 +951,15 @@ private fun RowScope.HistoryCell(value: String, width: Int, header: Boolean = fa
 }
 
 @Composable
-private fun FocusHeader(horizontalScroll: ScrollState) {
+private fun FocusHeader(horizontalScroll: ScrollState, supportsSectors: Boolean) {
   Row(Modifier.horizontalScroll(horizontalScroll).background(MaterialTheme.colorScheme.surfaceVariant).padding(vertical = 4.dp)) {
     FocusCell("METRIC", 100, true)
     FocusCell("TIME / DELTA", 130, true)
-    FocusCell("S1 / DELTA", 105, true)
-    FocusCell("S2 / DELTA", 105, true)
-    FocusCell("S3 / DELTA", 105, true)
+    if (supportsSectors) {
+      FocusCell("S1 / DELTA", 105, true)
+      FocusCell("S2 / DELTA", 105, true)
+      FocusCell("S3 / DELTA", 105, true)
+    }
     FocusCell("DRIVER / LAP", 180, true)
   }
 }
@@ -556,13 +969,16 @@ private fun FocusRow(
   comparison: LapComparison,
   latest: LapHistoryEntry?,
   horizontalScroll: ScrollState,
+  supportsSectors: Boolean,
 ) {
   Row(Modifier.horizontalScroll(horizontalScroll).padding(vertical = 4.dp)) {
     FocusCell(comparison.label, 100)
     TimeDeltaCell(comparison.timeMs, latest?.lapMs, 130)
-    TimeDeltaCell(comparison.sector1Ms, latest?.sector1Ms, 105, compact = true)
-    TimeDeltaCell(comparison.sector2Ms, latest?.sector2Ms, 105, compact = true)
-    TimeDeltaCell(comparison.sector3Ms, latest?.sector3Ms, 105, compact = true)
+    if (supportsSectors) {
+      TimeDeltaCell(comparison.sector1Ms, latest?.sector1Ms, 105, compact = true)
+      TimeDeltaCell(comparison.sector2Ms, latest?.sector2Ms, 105, compact = true)
+      TimeDeltaCell(comparison.sector3Ms, latest?.sector3Ms, 105, compact = true)
+    }
     FocusCell(
       comparison.driver?.let { "${it.name} / ${comparison.lap?.let { lap -> "L$lap" } ?: "mixed"}" }.orDash(),
       180,
@@ -634,30 +1050,38 @@ private fun timingViewModel(): MainScreenViewModel {
 @Composable
 private fun ConnectionPanel(
   state: TimingUiState,
-  onConnect: () -> Unit,
+  selectedTrack: TimingTrack?,
+  onTrackSelected: (TimingTrack) -> Unit,
+  onRetry: () -> Unit,
+  demoEnabled: Boolean,
   onDisconnect: () -> Unit,
-  onAutoReconnectChange: (Boolean) -> Unit,
-  onAnnouncementsClick: () -> Unit,
+  onShowDebugTools: () -> Unit,
   onConfigure: () -> Unit,
 ) {
+  var trackMenuExpanded by remember { mutableStateOf(false) }
   Column(Modifier.fillMaxWidth()) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
       Text("Lapbot", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-      TextButton(onClick = onAnnouncementsClick) { Text("Announcer") }
+      if (demoEnabled) TextButton(onClick = onShowDebugTools) { Text("Debug tools") }
     }
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-      Text(state.status.label, modifier = Modifier.padding(top = 13.dp), style = MaterialTheme.typography.labelLarge)
-      Row {
-        Switch(checked = state.autoReconnect, onCheckedChange = onAutoReconnectChange)
-        Text("Auto-reconnect", modifier = Modifier.padding(start = 4.dp, top = 13.dp), style = MaterialTheme.typography.labelSmall)
-        TextButton(onClick = onConfigure) { Text("Config") }
-        TextButton(
-          onClick = if (state.status == ConnectionStatus.Disconnected) onConnect else onDisconnect,
-          enabled = state.status != ConnectionStatus.Connecting && state.status != ConnectionStatus.Reconnecting,
-        ) {
-          Text(if (state.status == ConnectionStatus.Disconnected) "Connect" else "Disconnect")
-        }
-      }
+    ConnectionControl(
+      state = state,
+      selectedTrack = selectedTrack,
+      trackMenuExpanded = trackMenuExpanded,
+      onTrackMenuExpandedChange = { trackMenuExpanded = it },
+      onTrackSelected = { track ->
+        if (selectedTrack?.id != track.id) onTrackSelected(track)
+      },
+      onRetry = onRetry,
+      onDisconnect = onDisconnect,
+      onConfigure = onConfigure,
+    )
+    if (state.isDemo) {
+      Text(
+        "Session 837888 · kart #5 John Reeves · replayed at 2× speed",
+        color = MaterialTheme.colorScheme.primary,
+        style = MaterialTheme.typography.bodySmall,
+      )
     }
     state.error?.let {
       Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, maxLines = 2)
@@ -666,9 +1090,152 @@ private fun ConnectionPanel(
 }
 
 @Composable
+private fun ConnectionControl(
+  state: TimingUiState,
+  selectedTrack: TimingTrack?,
+  trackMenuExpanded: Boolean,
+  onTrackMenuExpandedChange: (Boolean) -> Unit,
+  onTrackSelected: (TimingTrack) -> Unit,
+  onRetry: () -> Unit,
+  onDisconnect: () -> Unit,
+  onConfigure: () -> Unit,
+) {
+  Card(Modifier.fillMaxWidth()) {
+    if (selectedTrack == null) {
+      Column(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+      ) {
+        Text("Select a track", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Text(
+          "Lapbot will connect automatically and show the active timing session.",
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          style = MaterialTheme.typography.bodySmall,
+        )
+        TrackMenu(
+          expanded = trackMenuExpanded,
+          buttonLabel = "Choose track",
+          onExpandedChange = onTrackMenuExpandedChange,
+          onTrackSelected = onTrackSelected,
+          usePrimaryButton = true,
+        )
+      }
+    } else {
+      Row(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        Column(Modifier.weight(1f)) {
+          Text(selectedTrack.label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+          Text(
+            if (state.isDemo) "Demo replay" else state.status.label,
+            color = if (state.status == ConnectionStatus.Connected) MaterialTheme.colorScheme.primary else Color.Unspecified,
+            style = MaterialTheme.typography.labelLarge,
+          )
+          Text(
+            state.connectionDescription(selectedTrack.label),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+          )
+        }
+        when (state.status) {
+          ConnectionStatus.Disconnected -> Button(onClick = onRetry) { Text("Retry") }
+          ConnectionStatus.Connected -> OutlinedButton(onClick = onDisconnect) { Text("Disconnect") }
+          ConnectionStatus.Connecting -> Button(onClick = {}, enabled = false) { Text("Connecting…") }
+          ConnectionStatus.Reconnecting -> Button(onClick = {}, enabled = false) { Text("Retrying…") }
+        }
+      }
+    }
+    HorizontalDivider()
+    Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+      if (selectedTrack != null) {
+        TrackMenu(
+          expanded = trackMenuExpanded,
+          buttonLabel = "Change track",
+          onExpandedChange = onTrackMenuExpandedChange,
+          onTrackSelected = onTrackSelected,
+        )
+      } else {
+        Spacer(Modifier.width(1.dp))
+      }
+      TextButton(onClick = onConfigure) { Text("Advanced settings") }
+    }
+  }
+}
+
+@Composable
+private fun TrackMenu(
+  expanded: Boolean,
+  buttonLabel: String,
+  onExpandedChange: (Boolean) -> Unit,
+  onTrackSelected: (TimingTrack) -> Unit,
+  usePrimaryButton: Boolean = false,
+) {
+  Box {
+    if (usePrimaryButton) {
+      Button(onClick = { onExpandedChange(true) }) { Text(buttonLabel) }
+    } else {
+      TextButton(onClick = { onExpandedChange(true) }) { Text(buttonLabel) }
+    }
+    DropdownMenu(expanded = expanded, onDismissRequest = { onExpandedChange(false) }) {
+      TimingTracks.All.forEach { track ->
+        DropdownMenuItem(
+          text = { Text(track.label) },
+          onClick = {
+            onExpandedChange(false)
+            onTrackSelected(track)
+          },
+        )
+      }
+    }
+  }
+}
+
+private fun TimingUiState.connectionDescription(trackLabel: String): String =
+    when {
+      isDemo -> "Replaying a recorded timing session"
+      status == ConnectionStatus.Disconnected -> "The connection stopped before a session became active"
+      status == ConnectionStatus.Connecting -> "Finding the active session"
+      status == ConnectionStatus.Connected -> "Active session connected"
+      else -> "Trying to restore the $trackLabel connection"
+    }
+
+@Composable
+private fun DebugToolsDialog(
+  canStartReplay: Boolean,
+  jsonTail: List<String>,
+  onStartReplay: () -> Unit,
+  onDismiss: () -> Unit,
+) {
+  AlertDialog(
+    onDismissRequest = onDismiss,
+    title = { Text("Debug tools") },
+    text = {
+      Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Replay a recorded Buckmore Park session using synthesized sector timings.")
+        if (!canStartReplay) {
+          Text(
+            "Disconnect from Live Timings before starting a replay.",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+          )
+        }
+        JsonTail(jsonTail, Modifier.fillMaxWidth().height(240.dp))
+      }
+    },
+    confirmButton = {
+      TextButton(onClick = onStartReplay, enabled = canStartReplay) { Text("Replay session 837888") }
+    },
+    dismissButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+  )
+}
+
+@Composable
 private fun TimingTable(
   rows: List<TimingRow>,
+  supportsSectors: Boolean,
   onDriverClick: (String) -> Unit,
+  emptyMessage: String = "Select a track to load live timing.",
   modifier: Modifier = Modifier,
 ) {
   val horizontalScroll = rememberScrollState()
@@ -683,13 +1250,15 @@ private fun TimingTable(
       TableCell("DRIVER", 130, true)
       TableCell("LAP", 40, true)
       TableCell("LAP TIME", 84, true)
-      TableCell("S1", 72, true)
-      TableCell("S2", 72, true)
-      TableCell("S3", 72, true)
+      if (supportsSectors) {
+        TableCell("S1", 72, true)
+        TableCell("S2", 72, true)
+        TableCell("S3", 72, true)
+      }
     }
     if (rows.isEmpty()) {
       Box(Modifier.fillMaxSize().padding(16.dp)) {
-        Text("Connect to load live timing.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(emptyMessage, color = MaterialTheme.colorScheme.onSurfaceVariant)
       }
     } else {
       LazyColumn(Modifier.fillMaxSize()) {
@@ -701,9 +1270,11 @@ private fun TimingTable(
             TableCell(row.name.orDash(), 130)
             TableCell(row.lap?.toString().orDash(), 40)
             RaceTimeCell(row.lapMs, previousLap?.lapMs, 84)
-            RaceTimeCell(row.sector1Ms, previousLap?.sector1Ms, 72)
-            RaceTimeCell(row.sector2Ms, previousLap?.sector2Ms, 72)
-            RaceTimeCell(row.sector3Ms, previousLap?.sector3Ms, 72)
+            if (supportsSectors) {
+              RaceTimeCell(row.sector1Ms, previousLap?.sector1Ms, 72)
+              RaceTimeCell(row.sector2Ms, previousLap?.sector2Ms, 72)
+              RaceTimeCell(row.sector3Ms, previousLap?.sector3Ms, 72)
+            }
           }
           HorizontalDivider()
         }
@@ -764,6 +1335,8 @@ private fun JsonTail(
 
 @Composable
 private fun ConfigurationDialog(
+  autoReconnect: Boolean,
+  onAutoReconnectChange: (Boolean) -> Unit,
   tailLimit: Float,
   onTailLimitChange: (Float) -> Unit,
   initialDelaySeconds: Float,
@@ -777,9 +1350,29 @@ private fun ConfigurationDialog(
 ) {
   AlertDialog(
     onDismissRequest = onDismiss,
-    title = { Text("Configuration") },
+    title = { Text("Advanced settings") },
     text = {
       Column {
+        Row(
+          Modifier.fillMaxWidth()
+            .toggleable(
+              value = autoReconnect,
+              role = Role.Switch,
+              onValueChange = onAutoReconnectChange,
+            )
+            .padding(vertical = 8.dp),
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          Column(Modifier.weight(1f)) {
+            Text("Auto-reconnect")
+            Text(
+              "Retry automatically if the timing connection drops",
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+              style = MaterialTheme.typography.bodySmall,
+            )
+          }
+          Switch(checked = autoReconnect, onCheckedChange = null)
+        }
         Text("JSON tail: latest ${tailLimit.roundToInt()} messages")
         Slider(
           value = tailLimit,
@@ -846,9 +1439,9 @@ private fun formatDelta(metricMs: Long?, latestMs: Long?): String {
 
 @Preview(showBackground = true, widthDp = 390, heightDp = 820)
 @Composable
-private fun MainScreenPreview() {
+private fun LiveTimingsScreenPreview() {
   LapbotTheme {
-    MainScreen(
+    LiveTimingsScreen(
       state =
         TimingUiState(
           status = ConnectionStatus.Connected,
@@ -865,7 +1458,7 @@ private fun MainScreenPreview() {
       onTailLimitChange = {},
       onReconnectPolicyChange = {},
       onDriverClick = {},
-      onAnnouncementsClick = {},
+      onRaceEngineerClick = {},
     )
   }
 }

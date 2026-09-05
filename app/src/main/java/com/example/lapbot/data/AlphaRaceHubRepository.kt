@@ -31,7 +31,10 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.suspendCancellableCoroutine
 
-class AlphaRaceHubRepository(private val site: String = "buckmore") : TimingRepository {
+class AlphaRaceHubRepository(
+  private val site: String = "buckmore",
+  private val track: TimingTrack = TimingTracks.BuckmorePark,
+) : TimingRepository {
   private val json = Json { ignoreUnknownKeys = true }
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
   private val client =
@@ -57,7 +60,7 @@ class AlphaRaceHubRepository(private val site: String = "buckmore") : TimingRepo
   private var reconnectJob: Job? = null
   private var backoffResetJob: Job? = null
 
-  override fun connect() {
+  override fun connect(trackId: String) {
     scope.launch {
       if (mutableState.value.status != ConnectionStatus.Disconnected) return@launch
       Log.i(TAG, "Connect requested")
@@ -67,6 +70,8 @@ class AlphaRaceHubRepository(private val site: String = "buckmore") : TimingRepo
       open(generation, reconnecting = false)
     }
   }
+
+  override fun startDemo() = Unit
 
   override fun disconnect() {
     scope.launch {
@@ -120,9 +125,15 @@ class AlphaRaceHubRepository(private val site: String = "buckmore") : TimingRepo
     scope.launch { mutableState.value = mutableState.value.copy(metricsSinceLap = lap) }
   }
 
-  override fun setAudioAnnouncements(enabled: Boolean) {
-    scope.launch { mutableState.value = mutableState.value.copy(audioAnnouncements = enabled) }
+  override fun setCoachEnabled(enabled: Boolean) {
+    scope.launch { mutableState.value = mutableState.value.copy(coachEnabled = enabled) }
   }
+
+  override fun setAnnouncementSettings(settings: AnnouncementSettings) {
+    scope.launch { mutableState.value = mutableState.value.copy(announcementSettings = settings) }
+  }
+
+  override fun previewAnnouncement() = Unit
 
   override fun setToneSettings(settings: ToneSettings) {
     scope.launch { mutableState.value = mutableState.value.copy(toneSettings = settings) }
@@ -138,9 +149,11 @@ class AlphaRaceHubRepository(private val site: String = "buckmore") : TimingRepo
   }
 
   private suspend fun open(activeGeneration: Int, reconnecting: Boolean) {
-    mutableState.value =
-      mutableState.value.copy(
-        status = if (reconnecting) ConnectionStatus.Reconnecting else ConnectionStatus.Connecting,
+      mutableState.value =
+        mutableState.value.copy(
+          status = if (reconnecting) ConnectionStatus.Reconnecting else ConnectionStatus.Connecting,
+          selectedTrackId = track.id,
+          supportsSectors = track.supportsSectors,
         error = null,
         jsonTail = if (reconnecting) mutableState.value.jsonTail else emptyList(),
       )

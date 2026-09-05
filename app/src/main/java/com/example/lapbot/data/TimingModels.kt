@@ -9,6 +9,21 @@ enum class ConnectionStatus {
   Reconnecting,
 }
 
+data class TimingTrack(
+  val id: String,
+  val label: String,
+  val supportsSectors: Boolean,
+)
+
+object TimingTracks {
+  val BuckmorePark = TimingTrack("buckmore", "Buckmore Park", supportsSectors = true)
+  val DaytonaSandownParkGp =
+    TimingTrack("daytona-sandown-gp", "Daytona Sandown Park GP Circuit", supportsSectors = false)
+  val All = listOf(BuckmorePark, DaytonaSandownParkGp)
+
+  fun find(id: String?): TimingTrack? = All.firstOrNull { it.id == id }
+}
+
 data class ReconnectPolicy(
   val initialDelayMs: Long = 500,
   val maxDelayMs: Long = 60_000,
@@ -24,10 +39,33 @@ enum class ToneMetric {
 }
 
 data class ToneSettings(
+  val enabled: Boolean = true,
   val metric: ToneMetric = ToneMetric.DriverBest,
   val referenceDurationMs: Int = 200,
   val lapDurationMs: Int = 300,
   val sectorDurationMs: Int = 150,
+)
+
+enum class AnnouncementVoiceGender {
+  Female,
+  Male,
+}
+
+enum class CoachingChattiness {
+  Low,
+  Medium,
+  High,
+}
+
+data class AnnouncementSettings(
+  val speakLastComparison: Boolean = true,
+  val speakBestComparison: Boolean = true,
+  val speakSectorDeltas: Boolean = false,
+  val sectorTonesEnabled: Boolean = true,
+  val speakCoaching: Boolean = false,
+  val coachingChattiness: CoachingChattiness = CoachingChattiness.Low,
+  val voiceGender: AnnouncementVoiceGender = AnnouncementVoiceGender.Female,
+  val speechRate: Float = 0.97f,
 )
 
 data class TimingRow(
@@ -76,14 +114,19 @@ data class LapTimelineEntry(
 
 data class TimingUiState(
   val status: ConnectionStatus = ConnectionStatus.Disconnected,
-  val autoReconnect: Boolean = false,
+  val isDemo: Boolean = false,
+  val autoReconnect: Boolean = true,
+  val selectedTrackId: String? = null,
+  val supportsSectors: Boolean = true,
   val rows: List<TimingRow> = emptyList(),
   val jsonTail: List<String> = emptyList(),
   val tailLimit: Int = 20,
   val reconnectPolicy: ReconnectPolicy = ReconnectPolicy(),
   val selectedKartNumber: String? = null,
   val metricsSinceLap: Int? = null,
-  val audioAnnouncements: Boolean = false,
+  val coachEnabled: Boolean = true,
+  val announcementSettings: AnnouncementSettings = AnnouncementSettings(),
+  val coachingObjective: CoachingObjectiveUiState = CoachingObjectiveUiState(),
   val toneSettings: ToneSettings = ToneSettings(),
   val error: String? = null,
 )
@@ -91,7 +134,9 @@ data class TimingUiState(
 interface TimingRepository : AutoCloseable {
   val state: StateFlow<TimingUiState>
 
-  fun connect()
+  fun connect(trackId: String = TimingTracks.BuckmorePark.id)
+
+  fun startDemo()
 
   fun disconnect()
 
@@ -105,7 +150,11 @@ interface TimingRepository : AutoCloseable {
 
   fun setMetricsSinceLap(lap: Int?)
 
-  fun setAudioAnnouncements(enabled: Boolean)
+  fun setCoachEnabled(enabled: Boolean)
+
+  fun setAnnouncementSettings(settings: AnnouncementSettings)
+
+  fun previewAnnouncement()
 
   fun setToneSettings(settings: ToneSettings)
 
