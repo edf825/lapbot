@@ -1,8 +1,11 @@
 package com.example.lapbot.service
 
 import com.example.lapbot.data.AnnouncementVoiceGender
+import com.example.lapbot.data.AnnouncementSettings
+import com.example.lapbot.data.ConnectionStatus
 import com.example.lapbot.data.LapTimelineEntry
 import com.example.lapbot.data.TimingRow
+import com.example.lapbot.data.TimingUiState
 import junit.framework.TestCase.assertEquals
 import junit.framework.TestCase.assertFalse
 import junit.framework.TestCase.assertNull
@@ -10,6 +13,61 @@ import junit.framework.TestCase.assertTrue
 import org.junit.Test
 
 class TimingStreamServiceTest {
+  @Test
+  fun voiceGapCommandUsesCurrentTimingAndKartNumberPreference() {
+    val rows =
+      listOf(
+        voiceGapRow("12", position = 3, gapToLeaderMs = 2_000),
+        voiceGapRow("8", position = 4, gapToLeaderMs = 3_200),
+        voiceGapRow("27", position = 5, gapToLeaderMs = 3_530),
+      )
+    val state =
+      TimingUiState(
+        status = ConnectionStatus.Connected,
+        selectedKartNumber = "8",
+        rows = rows,
+        announcementSettings = AnnouncementSettings(speakGaps = false, speakGapKartNumbers = true),
+      )
+
+    assertEquals(
+      listOf("Gap to P3, kart 12, 1 point 20", "Gap to P5, kart 27, point 33"),
+      formatGapVoiceCommandSections(state),
+    )
+  }
+
+  @Test
+  fun voiceGapCommandIsIndependentOfAutomaticGapAnnouncements() {
+    val rows =
+      listOf(
+        voiceGapRow("3", position = 3, gapToLeaderMs = 2_000),
+        voiceGapRow("4", position = 4, gapToLeaderMs = 3_200),
+      )
+
+    assertEquals(
+      listOf("Gap to P3, 1 point 20"),
+      formatGapVoiceCommandSections(
+        TimingUiState(
+          status = ConnectionStatus.Connected,
+          selectedKartNumber = "4",
+          rows = rows,
+          announcementSettings = AnnouncementSettings(speakGaps = false),
+        ),
+      ),
+    )
+  }
+
+  @Test
+  fun voiceGapCommandDegradesClearlyWithoutAUsableSession() {
+    assertEquals(
+      listOf("Live timing is not connected"),
+      formatGapVoiceCommandSections(TimingUiState()),
+    )
+    assertEquals(
+      listOf("Pick a driver in focus first"),
+      formatGapVoiceCommandSections(TimingUiState(status = ConnectionStatus.Connected)),
+    )
+  }
+
   @Test
   fun sectorTimingSpeaksOnlyTwoDecimalTimeAndDetectsNewPersonalBest() {
     val driver =
@@ -31,6 +89,16 @@ class TimingStreamServiceTest {
     assertEquals("18 point 54, new PB", formatSectorDeltaAnnouncement(delta))
     assertEquals("18 point 54", formatSectorDeltaAnnouncement(delta, includeBestComparison = false))
   }
+
+  private fun voiceGapRow(number: String, position: Int, gapToLeaderMs: Long) =
+    TimingRow(
+      id = number,
+      number = number,
+      position = position,
+      lap = 6,
+      gapToLeaderMs = gapToLeaderMs,
+      gapRecordedAtLap = 6,
+    )
 
   @Test
   fun equalOrSlowerSectorReportsItsPersonalBestDeficit() {

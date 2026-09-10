@@ -25,9 +25,13 @@ class MainScreenViewModel(private val repository: TimingRepository) : ViewModel(
 
   fun setSelectedKartNumber(kartNumber: String?) = repository.setSelectedKartNumber(kartNumber)
 
+  fun setAutoDetectDriverName(nameFragment: String?) = repository.setAutoDetectDriverName(nameFragment)
+
   fun setMetricsSinceLap(lap: Int?) = repository.setMetricsSinceLap(lap)
 
   fun setCoachEnabled(enabled: Boolean) = repository.setCoachEnabled(enabled)
+
+  fun setListenForCommands(enabled: Boolean) = repository.setListenForCommands(enabled)
 
   fun setAnnouncementSettings(settings: AnnouncementSettings) = repository.setAnnouncementSettings(settings)
 

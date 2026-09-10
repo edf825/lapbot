@@ -30,6 +30,8 @@ internal class TimingAccumulator {
           number = driverJson.text("CompetitorNumber").orEmpty(),
           name = driverJson.text("DriverName") ?: driverJson.text("CompetitorName").orEmpty(),
           position = driverJson.int("Position"),
+          gapToLeaderMs = driverJson.long("Behind") ?: driverJson.long("GapToLeader"),
+          gapToAheadMs = driverJson.long("Gap") ?: driverJson.long("GapToAhead"),
         )
       driverJson.array("Laps").forEach { lapElement ->
         val lapJson = lapElement.jsonObject
@@ -51,6 +53,12 @@ internal class TimingAccumulator {
       driver.number = driverPatch.text("CompetitorNumber") ?: driver.number
       driver.name = driverPatch.text("DriverName") ?: driverPatch.text("CompetitorName") ?: driver.name
       driver.position = driverPatch.int("Position") ?: driver.position
+      if ("Behind" in driverPatch || "GapToLeader" in driverPatch) {
+        driver.gapToLeaderMs = driverPatch.long("Behind") ?: driverPatch.long("GapToLeader")
+      }
+      if ("Gap" in driverPatch || "GapToAhead" in driverPatch) {
+        driver.gapToAheadMs = driverPatch.long("Gap") ?: driverPatch.long("GapToAhead")
+      }
 
       driverPatch.array("Laps").forEach lapLoop@{ lapElement ->
         val lapPatch = lapElement.jsonObject
@@ -85,6 +93,9 @@ internal class TimingAccumulator {
       number = number,
       name = name,
       position = position,
+      gapToLeaderMs = if (position == 1) 0L else gapToLeaderMs,
+      gapToAheadMs = if (position == 1) 0L else gapToAheadMs,
+      gapRecordedAtLap = latestLap?.number?.takeIf { position == 1 || gapToLeaderMs != null || gapToAheadMs != null },
       lap = latestLap?.number,
       sector1Ms = latestLap?.sector1Ms,
       sector2Ms = latestLap?.sector2Ms,
@@ -156,6 +167,8 @@ private data class DriverState(
   var number: String = "",
   var name: String = "",
   var position: Int? = null,
+  var gapToLeaderMs: Long? = null,
+  var gapToAheadMs: Long? = null,
   val laps: MutableMap<Int, LapState> = mutableMapOf(),
 )
 

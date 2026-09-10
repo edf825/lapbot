@@ -15,7 +15,11 @@ import com.example.lapbot.data.TimingUiState
 import com.example.lapbot.data.ConnectionStatus
 import com.example.lapbot.data.LapHistoryEntry
 import com.example.lapbot.data.LapTimelineEntry
+import com.example.lapbot.data.OpportunityConfidence
+import com.example.lapbot.data.RelativeOpportunityStatus
+import com.example.lapbot.data.RelativeOpportunityUiState
 import com.example.lapbot.data.TimingRow
+import com.example.lapbot.data.findDriverByNameFragment
 import junit.framework.TestCase.assertEquals
 import org.junit.Before
 import org.junit.Rule
@@ -58,7 +62,15 @@ class MainScreenTest {
             state = uiState,
             onBack = { destination = TestDestination.LiveTimings },
             onSelectedKartNumberChange = { uiState = uiState.copy(selectedKartNumber = it) },
+            onAutoDetectDriverNameChange = {
+              uiState =
+                uiState.copy(
+                  autoDetectDriverName = it,
+                  selectedKartNumber = findDriverByNameFragment(uiState.rows, it)?.number,
+                )
+            },
             onRadioMessagesChange = { uiState = uiState.copy(coachEnabled = it) },
+            onListenForCommandsChange = { uiState = uiState.copy(listenForCommands = it) },
             onSettingsClick = { engineerSettingsCount += 1 },
             onPitlaneModeClick = { destination = TestDestination.PitlaneMode },
           )
@@ -134,12 +146,54 @@ class MainScreenTest {
     composeTestRule.onNodeWithText("Pitlane Mode").assertIsNotEnabled()
     composeTestRule.onAllNodesWithText("Lap history").assertCountEquals(0)
 
-    composeTestRule.onNodeWithText("Enter kart number / pick from list").performClick()
+    composeTestRule.onNodeWithText("Select list / enter kart / auto-detect name").performClick()
     composeTestRule.onNodeWithText("#20 Elias Davey").performClick()
     composeTestRule.onNodeWithText("Pitlane Mode").assertIsEnabled().performClick()
 
     composeTestRule.onNodeWithText("Lap history").assertExists()
     composeTestRule.onNodeWithText("‹ Race Engineer").assertExists()
+  }
+
+  @Test
+  fun pitlaneModeRendersExplainableRelativeOpportunity() {
+    composeTestRule.runOnIdle {
+      uiState =
+        TimingUiState(
+          status = ConnectionStatus.Connected,
+          selectedTrackId = "buckmore",
+          selectedKartNumber = "20",
+          rows =
+            listOf(
+              TimingRow(
+                id = "20",
+                number = "20",
+                name = "Elias Davey",
+                lapTimeline = listOf(LapTimelineEntry(2, 79_130, 31_930, 21_200, 26_000)),
+              ),
+            ),
+          relativeOpportunity =
+            RelativeOpportunityUiState(
+              sector = 2,
+              benchmarkKartNumbers = listOf("1", "4"),
+              driverPaceMs = 21_200,
+              benchmarkPaceMs = 20_000,
+              relativeDeficitPercent = 6.0,
+              typicalDeficitPercent = 4.0,
+              excessDeficitPercentagePoints = 2.0,
+              initialOpportunityMs = 400,
+              opportunityMs = 400,
+              driverSampleCount = 5,
+              benchmarkSampleCount = 10,
+              confidence = OpportunityConfidence.Strong,
+              status = RelativeOpportunityStatus.Working,
+            ),
+        )
+      destination = TestDestination.PitlaneMode
+    }
+
+    composeTestRule.onNodeWithText("Relative opportunity").assertExists()
+    composeTestRule.onNodeWithText("6.0% off reference · 4.0% typical").assertExists()
+    composeTestRule.onNodeWithText("Additional loss indicator: 0.400 · Strong").assertExists()
   }
 
   @Test
@@ -162,6 +216,18 @@ class MainScreenTest {
 
     composeTestRule.runOnIdle { assertEquals(false, uiState.coachEnabled) }
     composeTestRule.onNodeWithText("Radio messages are off").assertExists()
+  }
+
+  @Test
+  fun listeningForCommandsIsOptInAndCanBeEnabled() {
+    composeTestRule.runOnIdle { uiState = TimingUiState(status = ConnectionStatus.Connected) }
+    composeTestRule.onNodeWithText("Race Engineer").performClick()
+
+    composeTestRule.onNodeWithText("Voice commands are off").assertExists()
+    composeTestRule.onNodeWithText("Listen for commands").performClick()
+
+    composeTestRule.runOnIdle { assertEquals(true, uiState.listenForCommands) }
+    composeTestRule.onNodeWithText("Say “Lapbot, gaps” for an on-demand update").assertExists()
   }
 
   @Test

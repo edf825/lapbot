@@ -6,6 +6,7 @@ import com.example.lapbot.data.TimingRepository
 import com.example.lapbot.data.TimingUiState
 import com.example.lapbot.data.ReconnectPolicy
 import com.example.lapbot.data.ToneSettings
+import com.example.lapbot.data.findDriverByNameFragment
 import junit.framework.TestCase.assertEquals
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.Test
@@ -36,6 +37,16 @@ class MainScreenViewModelTest {
     viewModel.previewAnnouncement()
 
     assertEquals(1, repository.previewCount)
+  }
+
+  @Test
+  fun listenForCommands_isForwardedToRepository() {
+    val repository = FakeTimingRepository()
+    val viewModel = MainScreenViewModel(repository)
+
+    viewModel.setListenForCommands(true)
+
+    assertEquals(true, viewModel.uiState.value.listenForCommands)
   }
 }
 
@@ -68,7 +79,15 @@ private class FakeTimingRepository : TimingRepository {
   }
 
   override fun setSelectedKartNumber(kartNumber: String?) {
-    state.value = state.value.copy(selectedKartNumber = kartNumber)
+    state.value = state.value.copy(selectedKartNumber = kartNumber, autoDetectDriverName = null)
+  }
+
+  override fun setAutoDetectDriverName(nameFragment: String?) {
+    state.value =
+      state.value.copy(
+        autoDetectDriverName = nameFragment,
+        selectedKartNumber = findDriverByNameFragment(state.value.rows, nameFragment)?.number,
+      )
   }
 
   override fun setMetricsSinceLap(lap: Int?) {
@@ -77,6 +96,10 @@ private class FakeTimingRepository : TimingRepository {
 
   override fun setCoachEnabled(enabled: Boolean) {
     state.value = state.value.copy(coachEnabled = enabled)
+  }
+
+  override fun setListenForCommands(enabled: Boolean) {
+    state.value = state.value.copy(listenForCommands = enabled)
   }
 
   override fun setAnnouncementSettings(settings: AnnouncementSettings) {

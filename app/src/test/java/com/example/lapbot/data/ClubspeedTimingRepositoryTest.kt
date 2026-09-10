@@ -32,9 +32,12 @@ class ClubspeedTimingRepositoryTest {
 
     val row = rows.single()
     assertEquals("clubspeed:83370:1293214:1", row.id)
+    assertEquals("clubspeed:83370", accumulator.sessionKey)
     assertEquals("1", row.number)
     assertEquals("Anonymous", row.name)
     assertEquals(1, row.position)
+    assertEquals(0L, row.gapToLeaderMs)
+    assertEquals(39, row.gapRecordedAtLap)
     assertEquals(39, row.lap)
     assertEquals(53_157L, row.lapMs)
     assertEquals(52_926L, row.bestLapMs)
@@ -76,11 +79,30 @@ class ClubspeedTimingRepositoryTest {
     assertNull(parseClubspeedTimeMs("-"))
   }
 
+  @Test
+  fun mapsClubspeedGapToLeaderAtTheCurrentLap() {
+    val row =
+      ClubspeedTimingAccumulator().apply(
+        scoreboard(
+          lap = 12,
+          lapTime = "53.157",
+          bestLapTime = "52.926",
+          position = 4,
+          gapToLeader = "00:00:03.200",
+        ),
+      ).single()
+
+    assertEquals(3_200L, row.gapToLeaderMs)
+    assertEquals(12, row.gapRecordedAtLap)
+  }
+
   private fun scoreboard(
     lap: Int,
     lapTime: String,
     bestLapTime: String,
     heat: String = "83370",
+    position: Int = 1,
+    gapToLeader: String = "-",
   ) =
     json.parseToJsonElement(
       """
@@ -96,8 +118,8 @@ class ClubspeedTimingRepositoryTest {
           "LTime":"$lapTime",
           "LapNum":"$lap",
           "BestLTime":"$bestLapTime",
-          "Position":"1",
-          "GapToLeader":"-"
+          "Position":"$position",
+          "GapToLeader":"$gapToLeader"
         }],
         "RaceRunning":true
       }

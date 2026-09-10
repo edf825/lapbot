@@ -125,7 +125,21 @@ class ClubspeedTimingRepository(
   }
 
   override fun setSelectedKartNumber(kartNumber: String?) {
-    scope.launch { mutableState.value = mutableState.value.copy(selectedKartNumber = canonicalKartNumber(kartNumber)) }
+    scope.launch {
+      mutableState.value =
+        mutableState.value.copy(selectedKartNumber = canonicalKartNumber(kartNumber), autoDetectDriverName = null)
+    }
+  }
+
+  override fun setAutoDetectDriverName(nameFragment: String?) {
+    scope.launch {
+      val canonical = canonicalDriverNameFragment(nameFragment)
+      mutableState.value =
+        mutableState.value.copy(
+          autoDetectDriverName = canonical,
+          selectedKartNumber = findDriverByNameFragment(mutableState.value.rows, canonical)?.number?.let(::canonicalKartNumber),
+        )
+    }
   }
 
   override fun setMetricsSinceLap(lap: Int?) {
@@ -134,6 +148,10 @@ class ClubspeedTimingRepository(
 
   override fun setCoachEnabled(enabled: Boolean) {
     scope.launch { mutableState.value = mutableState.value.copy(coachEnabled = enabled) }
+  }
+
+  override fun setListenForCommands(enabled: Boolean) {
+    scope.launch { mutableState.value = mutableState.value.copy(listenForCommands = enabled) }
   }
 
   override fun setAnnouncementSettings(settings: AnnouncementSettings) {
@@ -164,6 +182,7 @@ class ClubspeedTimingRepository(
         status = if (reconnecting) ConnectionStatus.Reconnecting else ConnectionStatus.Connecting,
         selectedTrackId = track.id,
         supportsSectors = track.supportsSectors,
+        supportsGaps = track.supportsGaps,
         rows = if (reconnecting) mutableState.value.rows else emptyList(),
         jsonTail = if (reconnecting) mutableState.value.jsonTail else emptyList(),
         error = null,
@@ -278,6 +297,7 @@ class ClubspeedTimingRepository(
     mutableState.value =
       mutableState.value.copy(
         rows = rows,
+        sessionKey = accumulator.sessionKey,
         jsonTail = (mutableState.value.jsonTail + scoreboard.toString()).takeLast(mutableState.value.tailLimit),
       )
     markConnected()
@@ -373,6 +393,8 @@ class ClubspeedTimingRepository(
 
 internal class ClubspeedTimingAccumulator {
   private var heatNumber: String? = null
+  val sessionKey: String?
+    get() = heatNumber?.let { "clubspeed:$it" }
   private val histories = mutableMapOf<String, MutableMap<Int, Long>>()
 
   fun apply(scoreboard: JsonObject): List<TimingRow> {
@@ -396,11 +418,16 @@ internal class ClubspeedTimingAccumulator {
           LapHistoryEntry(lap = number, lapMs = timeMs)
         }
       val bestLapMs = parseClubspeedTimeMs(row.text("BestLTime"))
+      val position = row.text("Position")?.toIntOrNull()
+      val gapToLeaderMs =
+        if (position == 1) 0L else parseClubspeedTimeMs(row.text("GapToLeader"))
       TimingRow(
         id = id,
         number = kart,
         name = row.text("RacerName").orEmpty(),
-        position = row.text("Position")?.toIntOrNull(),
+        position = position,
+        gapToLeaderMs = gapToLeaderMs,
+        gapRecordedAtLap = lap?.takeIf { gapToLeaderMs != null },
         lap = lap,
         lapMs = lapMs,
         recentCompletedLap = lap,

@@ -28,10 +28,10 @@ internal class CoachingPhraseBank {
       .replace("{delta}", formatSpokenDeltaMagnitude(abs(change.deltaMs)))
   }
 
-  fun highPerformanceRecognition(driverId: String, sector: Int, consecutive: Boolean): String {
+  fun consistencyRecognition(driverId: String, sector: Int, consecutive: Boolean): String {
     val category =
-      if (consecutive) HighPerformanceCategory.Consistent
-      else HighPerformanceCategory.InWindow
+      if (consecutive) ConsistencyCategory.Consistent
+      else ConsistencyCategory.InWindow
     return select(driverId, category.name, category.templates)
       .replace("{sector}", spokenSectorName(sector))
   }
@@ -192,7 +192,7 @@ private enum class SectorCategory(val templates: List<String>) {
   ),
 }
 
-private enum class HighPerformanceCategory(val templates: List<String>) {
+private enum class ConsistencyCategory(val templates: List<String>) {
   InWindow(
     listOf(
       "Sector {sector} is within a tenth of your repeatable best. Keep pushing",

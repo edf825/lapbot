@@ -4,9 +4,11 @@ import com.example.lapbot.data.CoachingObjectiveStatus
 import com.example.lapbot.data.CoachingObjectiveUiState
 import com.example.lapbot.data.CoachingChattiness
 import com.example.lapbot.data.LapHistoryEntry
+import com.example.lapbot.data.RelativeOpportunityUiState
 import com.example.lapbot.data.TimingRow
 import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.roundToLong
 
 /** Source timing can be clean without being an established, repeatable pace. */
 internal enum class CoachingSampleQuality {
@@ -32,7 +34,7 @@ internal data class CoachingThresholdPolicy(
   val sectorCooldownAttempts: Int = 3,
   val lapCooldownLaps: Int = 3,
   val varianceMultiplier: Double = 0.5,
-  val highPerformanceWindowMs: Long = 100,
+  val consistencyWindowMs: Long = 100,
   val establishedPace: EstablishedPacePolicy = EstablishedPacePolicy(),
 ) {
   fun effectiveDeltaMs(samples: List<Long>): Long =
@@ -94,6 +96,7 @@ internal data class CoachingResult(
   val sectorObservation: CoachingObservation? = null,
   val lapObservation: CoachingObservation? = null,
   val objectiveUi: CoachingObjectiveUiState = CoachingObjectiveUiState(),
+  val relativeOpportunityUi: RelativeOpportunityUiState = RelativeOpportunityUiState(),
 )
 
 private data class ObjectiveMemory(
@@ -105,7 +108,6 @@ private data class ObjectiveMemory(
   var lastSectorFeedbackAtAttempt: Int = Int.MIN_VALUE,
   var lastSectorFeedbackLap: Int = Int.MIN_VALUE,
   var lastLapFeedbackAtLap: Int = Int.MIN_VALUE,
-  var lastTheoreticalInsightAtLap: Int = Int.MIN_VALUE,
 )
 
 private data class RecognitionMemory(
@@ -113,19 +115,38 @@ private data class RecognitionMemory(
   val lastRecognizedLapBySector: MutableMap<Int, Int> = mutableMapOf(),
 )
 
+private data class OptimalLapMemory(
+  var lastSpokenLap: Int = Int.MIN_VALUE,
+  var lastSpokenBestLapMs: Long? = null,
+  var lastSpokenGapMs: Long? = null,
+)
+
+internal data class OptimalLapOpportunity(
+  val optimalLapMs: Long,
+  val bestCompleteLapMs: Long,
+  val assemblyGapMs: Long,
+  val contributingLapCount: Int,
+)
+
 /** Per-selected-driver, active-session coaching memory. All calculations stay deterministic. */
 internal class SessionCoach(private val policy: CoachingThresholdPolicy = TrackCoachingPolicies.buckmorePark) {
   private val objectives = mutableMapOf<String, ObjectiveMemory>()
   private val recognitions = mutableMapOf<String, RecognitionMemory>()
+  private val optimalLapMemories = mutableMapOf<String, OptimalLapMemory>()
   private var phraseBank = CoachingPhraseBank()
+  private val externalOpportunityCoach = ExternalOpportunityCoach()
 
   fun reset() {
     objectives.clear()
     recognitions.clear()
+    optimalLapMemories.clear()
     phraseBank = CoachingPhraseBank()
+    externalOpportunityCoach.reset()
   }
 
   fun objectiveUi(driverId: String): CoachingObjectiveUiState = objectives[driverId]?.toUi() ?: CoachingObjectiveUiState()
+
+  fun relativeOpportunityUi(): RelativeOpportunityUiState = externalOpportunityCoach.ui()
 
   fun onSector(
     driver: TimingRow,
@@ -134,7 +155,7 @@ internal class SessionCoach(private val policy: CoachingThresholdPolicy = TrackC
     timeMs: Long,
     chattiness: CoachingChattiness = CoachingChattiness.Low,
   ): CoachingResult {
-    val recognition = highPerformanceRecognition(driver, lap, sector, timeMs, chattiness)
+    val recognition = personalConsistencyRecognition(driver, lap, sector, timeMs, chattiness)
     val memory =
       objectives[driver.id]
         ?: return CoachingResult(sectorObservation = recognition, objectiveUi = objectiveUi(driver.id))
@@ -151,7 +172,7 @@ internal class SessionCoach(private val policy: CoachingThresholdPolicy = TrackC
       when (memory.qualifyingRun.size) {
         1 -> {
           memory.objective = memory.objective.copy(status = CoachingObjectiveStatus.PromisingImprovement)
-          if (attempt - memory.lastSectorFeedbackAtAttempt >= sectorCooldown(chattiness)) {
+          if (cooldownElapsed(attempt, memory.lastSectorFeedbackAtAttempt, sectorCooldown(chattiness))) {
             memory.lastSectorFeedbackAtAttempt = attempt
             memory.lastSectorFeedbackLap = lap
             CoachingObservation(
@@ -176,7 +197,7 @@ internal class SessionCoach(private val policy: CoachingThresholdPolicy = TrackC
     return CoachingResult(sectorObservation = observation ?: recognition, objectiveUi = memory.toUi())
   }
 
-  private fun highPerformanceRecognition(
+  private fun personalConsistencyRecognition(
     driver: TimingRow,
     lap: Int,
     sector: Int,
@@ -190,9 +211,9 @@ internal class SessionCoach(private val policy: CoachingThresholdPolicy = TrackC
     val memory = recognitions.getOrPut(driver.id, ::RecognitionMemory)
     val historicalSamples = sectorSamples(driver, sector, beforeLap = lap)
     val repeatableFastPace = establishedFastPace(historicalSamples, policy.establishedPace)
-    val inHighPerformanceWindow =
-      repeatableFastPace != null && timeMs <= repeatableFastPace + policy.highPerformanceWindowMs
-    if (!inHighPerformanceWindow) {
+    val inConsistencyWindow =
+      repeatableFastPace != null && timeMs <= repeatableFastPace + policy.consistencyWindowMs
+    if (!inConsistencyWindow) {
       memory.consecutiveAttemptsBySector[sector] = 0
       return null
     }
@@ -200,20 +221,56 @@ internal class SessionCoach(private val policy: CoachingThresholdPolicy = TrackC
     val consecutiveAttempts = (memory.consecutiveAttemptsBySector[sector] ?: 0) + 1
     memory.consecutiveAttemptsBySector[sector] = consecutiveAttempts
     memory.lastRecognizedLapBySector[sector] = lap
-    val message = phraseBank.highPerformanceRecognition(driver.id, sector, consecutive = consecutiveAttempts >= 2)
-    return CoachingObservation(message, sector, priority = 2)
+    val message = phraseBank.consistencyRecognition(driver.id, sector, consecutive = consecutiveAttempts >= 2)
+    val externalContext = externalOpportunityCoach.ui().takeIf { consecutiveAttempts == 2 && it.sector == sector }
+    return if (externalContext != null) {
+      CoachingObservation(
+        "$message. You're repeating your current pace, but sector ${sectorName(sector)} remains the clearest relative opportunity against the front-running reference",
+        sector,
+        priority = 4,
+      )
+    } else {
+      CoachingObservation(message, sector, priority = 2)
+    }
   }
 
   fun onLap(
     driver: TimingRow,
     lap: Int,
     chattiness: CoachingChattiness = CoachingChattiness.Low,
+  ): CoachingResult = onLap(driver, listOf(driver), lap, chattiness)
+
+  fun onLap(
+    driver: TimingRow,
+    field: List<TimingRow>,
+    lap: Int,
+    chattiness: CoachingChattiness = CoachingChattiness.Low,
+  ): CoachingResult {
+    val personal = onPersonalLap(driver, lap, chattiness)
+    val external = externalOpportunityCoach.onLap(driver, field, lap, chattiness)
+    val selectedObservation =
+      listOfNotNull(personal.lapObservation, external.observation).maxByOrNull(CoachingObservation::priority)
+    return personal.copy(
+      lapObservation = selectedObservation,
+      relativeOpportunityUi = external.ui,
+    )
+  }
+
+  private fun onPersonalLap(
+    driver: TimingRow,
+    lap: Int,
+    chattiness: CoachingChattiness,
   ): CoachingResult {
     val opportunities = opportunities(driver)
     val current = objectives[driver.id]
     if (current == null) {
       val next = opportunities.maxByOrNull { it.gapMs }
-      if (next == null) return CoachingResult(objectiveUi = CoachingObjectiveUiState())
+      if (next == null) {
+        return CoachingResult(
+          lapObservation = theoreticalInsight(driver, lap, chattiness),
+          objectiveUi = CoachingObjectiveUiState(),
+        )
+      }
       val objective =
         Objective(
           sector = next.sector,
@@ -259,7 +316,7 @@ internal class SessionCoach(private val policy: CoachingThresholdPolicy = TrackC
       postMedian != null &&
         !memory.objectiveImprovementAnnounced &&
         postMedian <= memory.objective.recentMedianAtStartMs - threshold &&
-        lap - memory.lastLapFeedbackAtLap >= lapCooldown(chattiness)
+        cooldownElapsed(lap, memory.lastLapFeedbackAtLap, lapCooldown(chattiness))
     ) {
       memory.objectiveImprovementAnnounced = true
       memory.lastLapFeedbackAtLap = lap
@@ -278,7 +335,7 @@ internal class SessionCoach(private val policy: CoachingThresholdPolicy = TrackC
     val observation =
       trendObservation(driver, lap, threshold, memory, chattiness)
         ?: sectorTrendObservation(driver, lap, memory, chattiness)
-        ?: theoreticalInsight(driver, lap, threshold, memory, chattiness)
+        ?: theoreticalInsight(driver, lap, chattiness)
     return CoachingResult(lapObservation = observation, objectiveUi = memory.toUi())
   }
 
@@ -289,7 +346,7 @@ internal class SessionCoach(private val policy: CoachingThresholdPolicy = TrackC
     memory: ObjectiveMemory,
     chattiness: CoachingChattiness,
   ): CoachingObservation? {
-    if (lap - memory.lastLapFeedbackAtLap < lapCooldown(chattiness)) return null
+    if (!cooldownElapsed(lap, memory.lastLapFeedbackAtLap, lapCooldown(chattiness))) return null
     val values = driver.lapHistory.sortedBy { it.lap }.map { it.lapMs }
     if (values.size < policy.establishedPace.minimumClusterSamples * 2) return null
     val recent = values.takeLast(policy.recentWindowSize)
@@ -307,7 +364,7 @@ internal class SessionCoach(private val policy: CoachingThresholdPolicy = TrackC
     memory: ObjectiveMemory,
     chattiness: CoachingChattiness,
   ): CoachingObservation? {
-    if (lap - memory.lastLapFeedbackAtLap < lapCooldown(chattiness)) return null
+    if (!cooldownElapsed(lap, memory.lastLapFeedbackAtLap, lapCooldown(chattiness))) return null
     val trend =
       (1..3).mapNotNull { sector ->
         val samples = sectorSamples(driver, sector)
@@ -330,25 +387,33 @@ internal class SessionCoach(private val policy: CoachingThresholdPolicy = TrackC
   private fun theoreticalInsight(
     driver: TimingRow,
     lap: Int,
-    threshold: Long,
-    memory: ObjectiveMemory,
     chattiness: CoachingChattiness,
   ): CoachingObservation? {
-    if (lap - memory.lastTheoreticalInsightAtLap < theoreticalCooldown(chattiness)) return null
-    val laps = driver.lapHistory
-    val theoretical =
-      listOf(
-        laps.mapNotNull { it.sector1Ms }.minOrNull(),
-        laps.mapNotNull { it.sector2Ms }.minOrNull(),
-        laps.mapNotNull { it.sector3Ms }.minOrNull(),
-      ).takeIf { it.all { value -> value != null } }?.sumOf { requireNotNull(it) } ?: return null
-    val bestLap = laps.minOfOrNull { it.lapMs } ?: return null
-    if (bestLap - theoretical < threshold) return null
-    memory.lastTheoreticalInsightAtLap = lap
-    return CoachingObservation(
-      "Your best sectors make ${formatSpokenHundredths(theoretical)}. The pace is there to put the lap together",
-      priority = 1,
-    )
+    val opportunity = analyzeOptimalLap(driver, policy.minimumMeaningfulDeltaMs) ?: return null
+    val memory = optimalLapMemories.getOrPut(driver.id, ::OptimalLapMemory)
+    if (!cooldownElapsed(lap, memory.lastSpokenLap, theoreticalCooldown(chattiness))) return null
+    val previousBest = memory.lastSpokenBestLapMs
+    val previousGap = memory.lastSpokenGapMs
+    val bestLapImprovement = previousBest?.minus(opportunity.bestCompleteLapMs) ?: 0
+    val gapReduction = previousGap?.minus(opportunity.assemblyGapMs) ?: 0
+    val progress = bestLapImprovement >= policy.minimumMeaningfulDeltaMs && gapReduction >= 100
+    val text =
+      if (progress) {
+        "Good work. Your best complete lap is ${formatSpokenDeltaMagnitude(gapReduction)} closer to your demonstrated optimal"
+      } else {
+        when (chattiness) {
+          CoachingChattiness.Low ->
+            "Your best sectors show about ${formatSpokenDeltaMagnitude(opportunity.assemblyGapMs)} of lap assembly opportunity"
+          CoachingChattiness.Medium ->
+            "Your demonstrated optimal is ${formatSpokenHundredths(opportunity.optimalLapMs)}, about ${formatSpokenDeltaMagnitude(opportunity.assemblyGapMs)} quicker than your best complete lap"
+          CoachingChattiness.High ->
+            "Your demonstrated optimal is ${formatSpokenHundredths(opportunity.optimalLapMs)}. Your best complete lap is ${formatSpokenDeltaMagnitude(opportunity.assemblyGapMs)} away, so the sector pace is there to link together"
+        }
+      }
+    memory.lastSpokenLap = lap
+    memory.lastSpokenBestLapMs = opportunity.bestCompleteLapMs
+    memory.lastSpokenGapMs = opportunity.assemblyGapMs
+    return CoachingObservation(text, priority = if (progress) 4 else 1)
   }
 
   private fun opportunities(driver: TimingRow): List<SectorOpportunity> =
@@ -411,5 +476,43 @@ internal class SessionCoach(private val policy: CoachingThresholdPolicy = TrackC
 
 private data class SectorOpportunity(val sector: Int, val recentMedianMs: Long, val establishedFastMs: Long, val gapMs: Long)
 private data class SectorTrend(val sector: Int, val deltaMs: Long)
+
+internal fun analyzeOptimalLap(
+  driver: TimingRow,
+  minimumOpportunityMs: Long = 150,
+  minimumCompleteLaps: Int = 3,
+): OptimalLapOpportunity? {
+  val completeLaps =
+    driver.lapHistory.filter { lap ->
+      val sectors = listOf(lap.sector1Ms, lap.sector2Ms, lap.sector3Ms)
+      if (lap.lapMs <= 0 || sectors.any { it == null || it <= 0 }) return@filter false
+      val sectorTotal = sectors.sumOf { requireNotNull(it) }
+      val tolerance = max(50L, (lap.lapMs * 0.001).roundToLong())
+      abs(sectorTotal - lap.lapMs) <= tolerance
+    }
+  if (completeLaps.size < minimumCompleteLaps) return null
+  val bestSectorLaps =
+    listOf(
+      requireNotNull(completeLaps.minByOrNull { requireNotNull(it.sector1Ms) }),
+      requireNotNull(completeLaps.minByOrNull { requireNotNull(it.sector2Ms) }),
+      requireNotNull(completeLaps.minByOrNull { requireNotNull(it.sector3Ms) }),
+    )
+  val optimal =
+    requireNotNull(bestSectorLaps[0].sector1Ms) +
+      requireNotNull(bestSectorLaps[1].sector2Ms) +
+      requireNotNull(bestSectorLaps[2].sector3Ms)
+  val bestCompleteLap = completeLaps.minOf(LapHistoryEntry::lapMs)
+  val gap = bestCompleteLap - optimal
+  if (gap < minimumOpportunityMs) return null
+  return OptimalLapOpportunity(
+    optimalLapMs = optimal,
+    bestCompleteLapMs = bestCompleteLap,
+    assemblyGapMs = gap,
+    contributingLapCount = bestSectorLaps.map(LapHistoryEntry::lap).distinct().size,
+  )
+}
+
+private fun cooldownElapsed(current: Int, previous: Int, cooldown: Int): Boolean =
+  previous == Int.MIN_VALUE || current.toLong() - previous.toLong() >= cooldown
 
 private fun sectorName(sector: Int): String = when (sector) { 1 -> "one"; 2 -> "two"; else -> "three" }

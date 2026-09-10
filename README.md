@@ -1,6 +1,6 @@
 # Lapbot
 
-Native Android live timing and audio-announcement app for Buckmore Park and Daytona Sandown Park, built with Kotlin and Jetpack Compose.
+Native Android live timing and audio-announcement app for Buckmore Park, Daytona Sandown Park, and TeamSport Farnborough, built with Kotlin and Jetpack Compose.
 
 See [PRODUCT_REQUIREMENTS.md](PRODUCT_REQUIREMENTS.md) for the live timing, metrics, announcements, and connection behavior specification.
 
@@ -31,15 +31,16 @@ The generated APK will be at `app/build/outputs/apk/debug/app-debug.apk`.
 
 ## Usage
 
-1. Choose `Buckmore Park` or `Daytona Sandown Park GP Circuit` in Live Timings. Lapbot connects automatically and displays the active timing session.
+1. Choose `Buckmore Park`, `Daytona Sandown Park GP Circuit`, or `TeamSport Farnborough` in Live Timings. Lapbot connects automatically and displays the active timing session.
 2. Wait for the status to change to `Live`.
 3. Once connected, tap the `Race Engineer` floating action button and choose the driver in focus.
-4. Open `Engineer Settings` for lap-call, comparison, voice, and tone configuration.
+4. Open `Engineer Settings` for lap-call, adjacent-position gap, comparison, voice, and tone configuration.
 5. Enable `Pitlane Mode` in the Race Engineer sheet for the live objective, comparison, and lap-history view used by someone monitoring the race.
 6. Optionally disable performance tones, choose their comparison metric, configure tone durations, or set `Metrics since lap` for a driver stint.
 
-Daytona's Clubspeed feed provides completed lap times but no sector splits. On
-that circuit Lapbot hides sector-only columns, coaching, controls, and tones;
+Daytona's Clubspeed feed and TeamSport Farnborough's SMS-Timing feed provide
+completed lap times but no sector splits. On those circuits Lapbot hides
+sector-only columns, coaching, controls, and tones;
 lap history is collected from the updates received while connected.
 
 Lap announcements and tones continue while the app is backgrounded.

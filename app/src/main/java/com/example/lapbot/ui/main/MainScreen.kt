@@ -1,6 +1,10 @@
 package com.example.lapbot.ui.main
 
+import android.Manifest
 import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.border
@@ -68,6 +72,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.lapbot.data.ConnectionStatus
@@ -85,6 +90,8 @@ import com.example.lapbot.data.ToneMetric
 import com.example.lapbot.data.ToneSettings
 import com.example.lapbot.service.formatSpokenDeltaMagnitude
 import com.example.lapbot.data.canonicalKartNumber
+import com.example.lapbot.data.canonicalDriverNameFragment
+import com.example.lapbot.data.findDriverByNameFragment
 import com.example.lapbot.data.metricLapsSince
 import com.example.lapbot.theme.LapbotTheme
 import kotlin.math.roundToInt
@@ -227,6 +234,7 @@ internal fun LiveTimingsScreen(
     DebugToolsDialog(
       canStartReplay = state.status == ConnectionStatus.Disconnected,
       jsonTail = state.jsonTail,
+      relativeOpportunity = state.relativeOpportunity,
       onStartReplay = {
         showDebugTools = false
         selectedTrackId = TimingTracks.BuckmorePark.id
@@ -280,6 +288,7 @@ fun EngineerSettingsScreen(
     AnnouncementComparisonControls(
       settings = state.announcementSettings,
       supportsSectors = state.supportsSectors,
+      supportsGaps = state.supportsGaps,
       onSettingsChange = viewModel::setAnnouncementSettings,
       onPreview = viewModel::previewAnnouncement,
     )
@@ -318,11 +327,28 @@ fun RaceEngineerScreen(
 ) {
   val viewModel = timingViewModel()
   val state by viewModel.uiState.collectAsStateWithLifecycle()
+  val context = LocalContext.current
+  val microphonePermission =
+    rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+      viewModel.setListenForCommands(granted)
+    }
+  val setListenForCommands: (Boolean) -> Unit = { enabled ->
+    if (
+      !enabled ||
+        ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+    ) {
+      viewModel.setListenForCommands(enabled)
+    } else {
+      microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
+    }
+  }
   RaceEngineerScreen(
     state = state,
     onBack = onBack,
     onSelectedKartNumberChange = viewModel::setSelectedKartNumber,
+    onAutoDetectDriverNameChange = viewModel::setAutoDetectDriverName,
     onRadioMessagesChange = viewModel::setCoachEnabled,
+    onListenForCommandsChange = setListenForCommands,
     onSettingsClick = onSettingsClick,
     onPitlaneModeClick = onPitlaneModeClick,
     modifier = modifier,
@@ -334,7 +360,9 @@ internal fun RaceEngineerScreen(
   state: TimingUiState,
   onBack: () -> Unit,
   onSelectedKartNumberChange: (String?) -> Unit,
+  onAutoDetectDriverNameChange: (String?) -> Unit,
   onRadioMessagesChange: (Boolean) -> Unit,
+  onListenForCommandsChange: (Boolean) -> Unit,
   onSettingsClick: () -> Unit,
   onPitlaneModeClick: () -> Unit,
   modifier: Modifier = Modifier,
@@ -345,7 +373,7 @@ internal fun RaceEngineerScreen(
     verticalArrangement = Arrangement.spacedBy(12.dp),
   ) {
     PageHeader("Race Engineer", onBack)
-    DriverFocusControl(state, onSelectedKartNumberChange)
+    DriverFocusControl(state, onSelectedKartNumberChange, onAutoDetectDriverNameChange)
     Row(
       Modifier.fillMaxWidth()
         .toggleable(
@@ -365,6 +393,26 @@ internal fun RaceEngineerScreen(
         )
       }
       Switch(checked = state.coachEnabled, onCheckedChange = null)
+    }
+    Row(
+      Modifier.fillMaxWidth()
+        .toggleable(
+          value = state.listenForCommands,
+          role = Role.Switch,
+          onValueChange = onListenForCommandsChange,
+        )
+        .padding(vertical = 8.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Column(Modifier.weight(1f)) {
+        Text("Listen for commands", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+        Text(
+          if (state.listenForCommands) "Say “Lapbot, gaps” for an on-demand update" else "Voice commands are off",
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          style = MaterialTheme.typography.bodySmall,
+        )
+      }
+      Switch(checked = state.listenForCommands, onCheckedChange = null)
     }
     OutlinedButton(onClick = onSettingsClick, modifier = Modifier.fillMaxWidth()) {
       Text("Engineer Settings")
@@ -415,6 +463,7 @@ internal fun PitlaneModeScreen(
       )
     } else {
       Text(selected.displayName, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+      if (state.supportsSectors) RelativeOpportunityCard(state.relativeOpportunity)
       if (state.supportsSectors) CoachingObjectiveCard(state.coachingObjective)
       DriverComparisonTable(state.rows, selected, state.metricsSinceLap, state.supportsSectors)
       LapHistoryTable(selected.lapTimeline, Modifier.weight(1f), supportsSectors = state.supportsSectors)
@@ -426,20 +475,35 @@ internal fun PitlaneModeScreen(
 private fun DriverFocusControl(
   state: TimingUiState,
   onSelectedKartNumberChange: (String?) -> Unit,
+  onAutoDetectDriverNameChange: (String?) -> Unit,
 ) {
   val drivers = state.rows.filter { canonicalKartNumber(it.number) != null }.sortedByKartNumber()
   val selected = drivers.firstOrNull { canonicalKartNumber(it.number) == state.selectedKartNumber }
   var driverMenuExpanded by remember { mutableStateOf(false) }
   var showKartEntry by remember { mutableStateOf(false) }
+  var showDriverNameEntry by remember { mutableStateOf(false) }
+  val autoDetected = findDriverByNameFragment(drivers, state.autoDetectDriverName)
+  val nameMatchCount =
+    state.autoDetectDriverName?.let { fragment ->
+      drivers
+        .filter { it.name.contains(fragment, ignoreCase = true) }
+        .mapNotNull { canonicalKartNumber(it.number) }
+        .distinct()
+        .size
+    } ?: 0
 
   Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
     Text("Driver in Focus", style = MaterialTheme.typography.labelLarge)
     Box {
       OutlinedButton(onClick = { driverMenuExpanded = true }, modifier = Modifier.fillMaxWidth()) {
         Text(
-          selected?.displayName
+          state.autoDetectDriverName?.let { fragment ->
+            autoDetected?.let { "${it.displayName} · auto “$fragment”" }
+              ?: "Auto “$fragment” · ${if (nameMatchCount > 1) "ambiguous" else "waiting"}"
+          }
+            ?: selected?.displayName
             ?: state.selectedKartNumber?.let { "#$it Waiting" }
-            ?: "Enter kart number / pick from list",
+            ?: "Select list / enter kart / auto-detect name",
           maxLines = 1,
           overflow = TextOverflow.Ellipsis,
         )
@@ -452,7 +516,17 @@ private fun DriverFocusControl(
             showKartEntry = true
           },
         )
-        if (drivers.isNotEmpty()) HorizontalDivider()
+        DropdownMenuItem(
+          text = { Text("Auto-detect driver named...") },
+          onClick = {
+            driverMenuExpanded = false
+            showDriverNameEntry = true
+          },
+        )
+        if (drivers.isNotEmpty()) {
+          HorizontalDivider()
+          DropdownMenuItem(text = { Text("Select from list") }, onClick = {}, enabled = false)
+        }
         drivers.forEach { driver ->
           DropdownMenuItem(
             text = { Text(driver.displayName) },
@@ -473,6 +547,16 @@ private fun DriverFocusControl(
         showKartEntry = false
       },
       onDismiss = { showKartEntry = false },
+    )
+  }
+  if (showDriverNameEntry) {
+    DriverNameDialog(
+      initialValue = state.autoDetectDriverName.orEmpty(),
+      onApply = {
+        onAutoDetectDriverNameChange(it)
+        showDriverNameEntry = false
+      },
+      onDismiss = { showDriverNameEntry = false },
     )
   }
 }
@@ -503,6 +587,47 @@ private fun CoachingObjectiveCard(objective: com.example.lapbot.data.CoachingObj
   }
 }
 
+@Composable
+private fun RelativeOpportunityCard(opportunity: com.example.lapbot.data.RelativeOpportunityUiState) {
+  Card(Modifier.fillMaxWidth()) {
+    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+      Text("Relative opportunity", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+      if (opportunity.frontRunningSectors.isNotEmpty()) {
+        Text(
+          "Front-running repeatable pace: ${opportunity.frontRunningSectors.sorted().joinToString { "S$it" }}",
+          color = FasterGreen,
+          style = MaterialTheme.typography.bodySmall,
+        )
+      }
+      if (opportunity.sector == null) {
+        Text("Collecting credible faster-driver comparisons", color = MaterialTheme.colorScheme.onSurfaceVariant)
+      } else {
+        Text("Sector ${opportunity.sector} · ${opportunity.status.name.replaceWords()}")
+        val references = opportunity.benchmarkKartNumbers.joinToString { "#$it" }
+        if (references.isNotEmpty()) Text("Front-running reference: $references", style = MaterialTheme.typography.bodySmall)
+        Text(
+          "${formatPercentValue(opportunity.relativeDeficitPercent)} off reference · " +
+            "${formatPercentValue(opportunity.typicalDeficitPercent)} typical",
+          style = MaterialTheme.typography.bodySmall,
+        )
+        val initial = opportunity.initialOpportunityMs
+        val current = opportunity.opportunityMs
+        val opportunityLabel =
+          if (initial != null && current != null && initial != current) {
+            "Current additional loss: ${formatMillis(current)} (from ${formatMillis(initial)})"
+          } else {
+            "Additional loss indicator: ${formatMillis(current)}"
+          }
+        Text(
+          "$opportunityLabel · ${opportunity.confidence?.name ?: "—"}",
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          style = MaterialTheme.typography.bodySmall,
+        )
+      }
+    }
+  }
+}
+
 private fun com.example.lapbot.data.CoachingObjectiveStatus.objectiveStatusLabel(): String =
   when (this) {
     com.example.lapbot.data.CoachingObjectiveStatus.CollectingData -> "Collecting data"
@@ -517,6 +642,7 @@ private fun com.example.lapbot.data.CoachingObjectiveStatus.objectiveStatusLabel
 private fun AnnouncementComparisonControls(
   settings: AnnouncementSettings,
   supportsSectors: Boolean,
+  supportsGaps: Boolean,
   onSettingsChange: (AnnouncementSettings) -> Unit,
   onPreview: () -> Unit,
 ) {
@@ -533,6 +659,40 @@ private fun AnnouncementComparisonControls(
       Switch(
         checked = settings.speakBestComparison,
         onCheckedChange = { onSettingsChange(settings.copy(speakBestComparison = it)) },
+      )
+    }
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+      Column(Modifier.weight(1f).padding(top = 8.dp)) {
+        Text("Speak gaps", style = MaterialTheme.typography.bodySmall)
+        Text(
+          if (supportsGaps) "Gap to the positions immediately ahead and behind"
+          else "Gap data is unavailable for this timing provider",
+          style = MaterialTheme.typography.labelSmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+      }
+      Switch(
+        checked = settings.speakGaps,
+        enabled = supportsGaps,
+        onCheckedChange = { onSettingsChange(settings.copy(speakGaps = it)) },
+      )
+    }
+    Row(
+      Modifier.fillMaxWidth().padding(start = 16.dp),
+      horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+      Column(Modifier.weight(1f).padding(top = 8.dp)) {
+        Text("Include kart numbers", style = MaterialTheme.typography.bodySmall)
+        Text(
+          "Identify the karts occupying the adjacent positions",
+          style = MaterialTheme.typography.labelSmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+      }
+      Switch(
+        checked = settings.speakGapKartNumbers,
+        enabled = supportsGaps && settings.speakGaps,
+        onCheckedChange = { onSettingsChange(settings.copy(speakGapKartNumbers = it)) },
       )
     }
     if (supportsSectors) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -627,6 +787,33 @@ private fun KartNumberDialog(initialValue: String, onApply: (String) -> Unit, on
     },
     confirmButton = {
       TextButton(onClick = { onApply(value) }, enabled = canonicalKartNumber(value) != null) { Text("Select") }
+    },
+    dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+  )
+}
+
+@Composable
+private fun DriverNameDialog(initialValue: String, onApply: (String) -> Unit, onDismiss: () -> Unit) {
+  var value by remember(initialValue) { mutableStateOf(initialValue) }
+  AlertDialog(
+    onDismissRequest = onDismiss,
+    title = { Text("Auto-detect driver") },
+    text = {
+      Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Lapbot will follow the kart assigned to the single driver whose name contains this phrase.")
+        OutlinedTextField(
+          value = value,
+          onValueChange = { value = it.take(40) },
+          label = { Text("Driver name fragment") },
+          singleLine = true,
+        )
+      }
+    },
+    confirmButton = {
+      TextButton(
+        onClick = { onApply(value) },
+        enabled = canonicalDriverNameFragment(value) != null,
+      ) { Text("Track driver") }
     },
     dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
   )
@@ -1205,6 +1392,7 @@ private fun TimingUiState.connectionDescription(trackLabel: String): String =
 private fun DebugToolsDialog(
   canStartReplay: Boolean,
   jsonTail: List<String>,
+  relativeOpportunity: com.example.lapbot.data.RelativeOpportunityUiState,
   onStartReplay: () -> Unit,
   onDismiss: () -> Unit,
 ) {
@@ -1220,7 +1408,8 @@ private fun DebugToolsDialog(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
           )
         }
-        JsonTail(jsonTail, Modifier.fillMaxWidth().height(240.dp))
+        RelativeOpportunityDebug(relativeOpportunity)
+        JsonTail(jsonTail, Modifier.fillMaxWidth().height(160.dp))
       }
     },
     confirmButton = {
@@ -1228,6 +1417,37 @@ private fun DebugToolsDialog(
     },
     dismissButton = { TextButton(onClick = onDismiss) { Text("Close") } },
   )
+}
+
+@Composable
+private fun RelativeOpportunityDebug(opportunity: com.example.lapbot.data.RelativeOpportunityUiState) {
+  Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+    Text("Relative coaching analysis", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+    if (opportunity.sector == null) {
+      Text("No established external opportunity", style = MaterialTheme.typography.labelSmall)
+    } else {
+      Text(
+        "S${opportunity.sector}: driver=${formatMillis(opportunity.driverPaceMs)}, " +
+          "benchmark=${formatMillis(opportunity.benchmarkPaceMs)}",
+        fontFamily = FontFamily.Monospace,
+        style = MaterialTheme.typography.labelSmall,
+      )
+      Text(
+        "deficit=${formatPercentValue(opportunity.relativeDeficitPercent)}, " +
+          "typical=${formatPercentValue(opportunity.typicalDeficitPercent)}, " +
+          "excess=${formatPercentagePoints(opportunity.excessDeficitPercentagePoints)}",
+        fontFamily = FontFamily.Monospace,
+        style = MaterialTheme.typography.labelSmall,
+      )
+      Text(
+        "opportunity=${formatMillis(opportunity.initialOpportunityMs)}→${formatMillis(opportunity.opportunityMs)}, samples=" +
+          "${opportunity.driverSampleCount}/${opportunity.benchmarkSampleCount}, " +
+          "reference=${opportunity.benchmarkKartNumbers.joinToString()}",
+        fontFamily = FontFamily.Monospace,
+        style = MaterialTheme.typography.labelSmall,
+      )
+    }
+  }
 }
 
 @Composable
@@ -1410,6 +1630,13 @@ private fun ConfigurationDialog(
 
 private fun formatSeconds(seconds: Float): String =
   if (seconds % 1f == 0f) "${seconds.roundToInt()} seconds" else "${seconds}s"
+
+private fun formatPercentValue(value: Double?): String = value?.let { "%.1f%%".format(it) } ?: "—"
+
+private fun formatPercentagePoints(value: Double?): String = value?.let { "%+.1fpp".format(it) } ?: "—"
+
+private fun String.replaceWords(): String =
+  replace(Regex("([a-z])([A-Z])"), "$1 $2").lowercase().replaceFirstChar(Char::uppercase)
 
 private val ConnectionStatus.label: String
   get() =

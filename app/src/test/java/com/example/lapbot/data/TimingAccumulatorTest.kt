@@ -54,6 +54,24 @@ class TimingAccumulatorTest {
   }
 
   @Test
+  fun alphaBehindAndGapFieldsMapToLeaderAndPrecedingPosition() {
+    val accumulator = TimingAccumulator()
+    val rows =
+      accumulator.replace(
+        json.parseToJsonElement(
+          """{"Competitors":[{"CompetitorId":1,"Position":1,"Laps":[{"LapNumber":2,"LapTime":43212,"Split1Time":14000,"Split2Time":15000,"Split3Time":14212}]},{"CompetitorId":2,"Position":2,"Behind":830,"Gap":830,"Laps":[{"LapNumber":2,"LapTime":44042,"Split1Time":14300,"Split2Time":15300,"Split3Time":14442}]},{"CompetitorId":3,"Position":3,"Behind":1059,"Gap":229,"Laps":[{"LapNumber":2,"LapTime":44271,"Split1Time":14400,"Split2Time":15400,"Split3Time":14471}]}]}""",
+        ).jsonObject,
+      )
+
+    assertEquals(0L, rows[0].gapToLeaderMs)
+    assertEquals(830L, rows[1].gapToLeaderMs)
+    assertEquals(830L, rows[1].gapToAheadMs)
+    assertEquals(1_059L, rows[2].gapToLeaderMs)
+    assertEquals(229L, rows[2].gapToAheadMs)
+    assertEquals(2, rows[2].gapRecordedAtLap)
+  }
+
+  @Test
   fun completedLapMetricsIgnorePartialCurrentLap() {
     val accumulator = TimingAccumulator()
     val rows =

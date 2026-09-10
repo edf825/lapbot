@@ -70,7 +70,7 @@ class SessionCoachingTest {
   }
 
   @Test
-  fun highDetailRecognizesSectorsInsideRepeatableHighPerformanceWindow() {
+  fun highDetailRecognizesSectorsInsidePersonalConsistencyWindow() {
     val coach = SessionCoach()
     val driver = consistentDriver()
 
@@ -86,7 +86,7 @@ class SessionCoachingTest {
   }
 
   @Test
-  fun performanceWindowRecognitionIsExclusiveToHighDetail() {
+  fun consistencyWindowRecognitionIsExclusiveToHighDetail() {
     val driver = consistentDriver()
 
     assertNull(SessionCoach().onSector(driver, 5, 1, 17_080, CoachingChattiness.Low).sectorObservation)
@@ -94,7 +94,7 @@ class SessionCoachingTest {
   }
 
   @Test
-  fun highDetailDoesNotPraiseSectorOutsideHighPerformanceWindow() {
+  fun highDetailDoesNotPraiseSectorOutsidePersonalConsistencyWindow() {
     val result = SessionCoach().onSector(consistentDriver(), 5, 1, 17_200, CoachingChattiness.High)
 
     assertNull(result.sectorObservation)
@@ -115,7 +115,7 @@ class SessionCoachingTest {
   }
 
   @Test
-  fun repeatedHighPerformanceRecognitionVariesWithoutLosingPrecision() {
+  fun repeatedConsistencyRecognitionVariesWithoutLosingPrecision() {
     val coach = SessionCoach()
     val driver = consistentDriver()
 
@@ -130,6 +130,89 @@ class SessionCoachingTest {
     assertTrue(messages.all { it.contains("sector one", ignoreCase = true) })
   }
 
+  @Test
+  fun personalConsistencyCanCoexistWithAnExternalRelativeOpportunity() {
+    val coach = SessionCoach()
+    val focused = relativeDriver("focused", "8", 31_930, 21_200, 26_000)
+    val benchmark = relativeDriver("benchmark", "1", 31_000, 20_000, 25_000)
+    val field = listOf(focused, benchmark)
+    coach.onLap(focused, field, 5, CoachingChattiness.High)
+    coach.onLap(focused, field, 6, CoachingChattiness.High)
+
+    coach.onSector(focused, 7, 2, 21_250, CoachingChattiness.High)
+    val combined = coach.onSector(focused, 8, 2, 21_240, CoachingChattiness.High)
+
+    val message = requireNotNull(combined.sectorObservation).text
+    assertTrue(message.contains("consisten", ignoreCase = true))
+    assertTrue(message.contains("current pace"))
+    assertTrue(message.contains("relative opportunity"))
+  }
+
+  @Test
+  fun optimalLapAnalysisCombinesCredibleCompleteLaps() {
+    val driver = lapAssemblyDriver()
+
+    val opportunity = requireNotNull(analyzeOptimalLap(driver))
+
+    assertEquals(30_000L, opportunity.optimalLapMs)
+    assertEquals(32_000L, opportunity.bestCompleteLapMs)
+    assertEquals(2_000L, opportunity.assemblyGapMs)
+    assertEquals(3, opportunity.contributingLapCount)
+  }
+
+  @Test
+  fun theoreticalInsightWorksWithoutASeparateSectorObjective() {
+    val result = SessionCoach().onLap(lapAssemblyDriver(), lap = 3, chattiness = CoachingChattiness.High)
+
+    val message = requireNotNull(result.lapObservation).text
+    assertTrue(message.contains("demonstrated optimal"))
+    assertTrue(message.contains("sector pace is there to link together"))
+    assertNull(result.objectiveUi.sector)
+  }
+
+  @Test
+  fun malformedOrIncompleteLapCannotCreateAnOptimalLapOpportunity() {
+    val driver =
+      lapAssemblyDriver().copy(
+        lapHistory =
+          lapAssemblyDriver().lapHistory +
+            LapHistoryEntry(4, 25_000, 5_000, 10_000, null) +
+            LapHistoryEntry(5, 40_000, 5_000, 10_000, 10_000),
+      )
+
+    val opportunity = requireNotNull(analyzeOptimalLap(driver))
+
+    assertEquals(30_000L, opportunity.optimalLapMs)
+  }
+
+  @Test
+  fun closingTheLapAssemblyGapProducesProgressRecognition() {
+    val coach = SessionCoach()
+    val initial = lapAssemblyDriver()
+    coach.onLap(initial, lap = 3, chattiness = CoachingChattiness.High)
+    val improved =
+      initial.copy(
+        lapHistory = initial.lapHistory + LapHistoryEntry(4, 31_200, 10_400, 10_400, 10_400),
+      )
+
+    val result = coach.onLap(improved, lap = 6, chattiness = CoachingChattiness.High)
+
+    val message = requireNotNull(result.lapObservation).text
+    assertTrue(message.contains("closer to your demonstrated optimal"))
+  }
+
+  private fun lapAssemblyDriver() =
+    TimingRow(
+      id = "assembly",
+      number = "12",
+      lapHistory =
+        listOf(
+          LapHistoryEntry(1, 32_000, 10_000, 11_000, 11_000),
+          LapHistoryEntry(2, 32_000, 11_000, 10_000, 11_000),
+          LapHistoryEntry(3, 32_000, 11_000, 11_000, 10_000),
+        ),
+    )
+
   private fun consistentDriver() =
     TimingRow(
       id = "5",
@@ -140,5 +223,27 @@ class SessionCoachingTest {
           LapHistoryEntry(3, 51_080, 17_020, 17_020, 17_040),
           LapHistoryEntry(4, 51_100, 17_030, 17_030, 17_040),
         ),
+    )
+
+  private fun relativeDriver(
+    id: String,
+    number: String,
+    sector1: Long,
+    sector2: Long,
+    sector3: Long,
+  ) =
+    TimingRow(
+      id = id,
+      number = number,
+      lapHistory =
+        listOf(-20L, 0L, 20L, -10L, 10L).mapIndexed { index, jitter ->
+          LapHistoryEntry(
+            index + 1,
+            sector1 + sector2 + sector3 + jitter * 3,
+            sector1 + jitter,
+            sector2 + jitter,
+            sector3 + jitter,
+          )
+        }.reversed(),
     )
 }

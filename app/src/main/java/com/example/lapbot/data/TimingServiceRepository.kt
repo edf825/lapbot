@@ -18,10 +18,20 @@ class TimingServiceRepository(context: Context) : TimingRepository {
   override val state: StateFlow<TimingUiState> = TimingServiceState.mutableState
 
   init {
+    val autoDetectDriverName = canonicalDriverNameFragment(preferences.getString(PREF_AUTO_DETECT_DRIVER_NAME, null))
     TimingServiceState.mutableState.value =
       TimingServiceState.mutableState.value.copy(
         autoReconnect = preferences.getBoolean(PREF_AUTO_RECONNECT, true),
         coachEnabled = preferences.getBoolean(PREF_COACH_ENABLED, true),
+        listenForCommands = preferences.getBoolean(PREF_LISTEN_FOR_COMMANDS, false),
+        autoDetectDriverName = autoDetectDriverName,
+        selectedKartNumber =
+          if (autoDetectDriverName != null) {
+            findDriverByNameFragment(TimingServiceState.mutableState.value.rows, autoDetectDriverName)
+              ?.number?.let(::canonicalKartNumber)
+          } else {
+            TimingServiceState.mutableState.value.selectedKartNumber
+          },
         announcementSettings = loadAnnouncementSettings(),
         toneSettings =
           TimingServiceState.mutableState.value.toneSettings.copy(
@@ -55,6 +65,7 @@ class TimingServiceRepository(context: Context) : TimingRepository {
           isDemo = false,
           selectedTrackId = null,
           supportsSectors = true,
+          supportsGaps = true,
           error = null,
         )
     }
@@ -100,7 +111,27 @@ class TimingServiceRepository(context: Context) : TimingRepository {
 
   override fun setSelectedKartNumber(kartNumber: String?) {
     TimingServiceState.mutableState.value =
-      TimingServiceState.mutableState.value.copy(selectedKartNumber = canonicalKartNumber(kartNumber))
+      TimingServiceState.mutableState.value.copy(
+        selectedKartNumber = canonicalKartNumber(kartNumber),
+        autoDetectDriverName = null,
+      )
+    preferences.edit().remove(PREF_AUTO_DETECT_DRIVER_NAME).apply()
+  }
+
+  override fun setAutoDetectDriverName(nameFragment: String?) {
+    val canonical = canonicalDriverNameFragment(nameFragment)
+    val matchedKart =
+      findDriverByNameFragment(TimingServiceState.mutableState.value.rows, canonical)
+        ?.number?.let(::canonicalKartNumber)
+    TimingServiceState.mutableState.value =
+      TimingServiceState.mutableState.value.copy(
+        autoDetectDriverName = canonical,
+        selectedKartNumber = matchedKart,
+      )
+    preferences.edit().apply {
+      if (canonical == null) remove(PREF_AUTO_DETECT_DRIVER_NAME)
+      else putString(PREF_AUTO_DETECT_DRIVER_NAME, canonical)
+    }.apply()
   }
 
   override fun setMetricsSinceLap(lap: Int?) {
@@ -112,6 +143,18 @@ class TimingServiceRepository(context: Context) : TimingRepository {
     preferences.edit().putBoolean(PREF_COACH_ENABLED, enabled).apply()
   }
 
+  override fun setListenForCommands(enabled: Boolean) {
+    TimingServiceState.mutableState.value =
+      TimingServiceState.mutableState.value.copy(listenForCommands = enabled)
+    preferences.edit().putBoolean(PREF_LISTEN_FOR_COMMANDS, enabled).apply()
+    if (TimingServiceState.running) {
+      applicationContext.startService(
+        serviceIntent(TimingStreamService.ACTION_SET_LISTEN_FOR_COMMANDS)
+          .putExtra(TimingStreamService.EXTRA_LISTEN_FOR_COMMANDS, enabled),
+      )
+    }
+  }
+
   override fun setAnnouncementSettings(settings: AnnouncementSettings) {
     val bounded = settings.copy(speechRate = settings.speechRate.coerceIn(0.8f, 1.1f))
     TimingServiceState.mutableState.value =
@@ -121,6 +164,8 @@ class TimingServiceRepository(context: Context) : TimingRepository {
     preferences.edit()
       .putBoolean(PREF_SPEAK_LAST, bounded.speakLastComparison)
       .putBoolean(PREF_SPEAK_BEST, bounded.speakBestComparison)
+      .putBoolean(PREF_SPEAK_GAPS, bounded.speakGaps)
+      .putBoolean(PREF_SPEAK_GAP_KART_NUMBERS, bounded.speakGapKartNumbers)
       .putBoolean(PREF_SPEAK_SECTOR_DELTAS, bounded.speakSectorDeltas)
       .putBoolean(PREF_SECTOR_TONES_ENABLED, bounded.sectorTonesEnabled)
       .putBoolean(PREF_SPEAK_COACHING, bounded.speakCoaching)
@@ -171,6 +216,9 @@ class TimingServiceRepository(context: Context) : TimingRepository {
     return AnnouncementSettings(
       speakLastComparison = preferences.getBoolean(PREF_SPEAK_LAST, defaults.speakLastComparison),
       speakBestComparison = preferences.getBoolean(PREF_SPEAK_BEST, defaults.speakBestComparison),
+      speakGaps = preferences.getBoolean(PREF_SPEAK_GAPS, defaults.speakGaps),
+      speakGapKartNumbers =
+        preferences.getBoolean(PREF_SPEAK_GAP_KART_NUMBERS, defaults.speakGapKartNumbers),
       speakSectorDeltas = preferences.getBoolean(PREF_SPEAK_SECTOR_DELTAS, defaults.speakSectorDeltas),
       sectorTonesEnabled = preferences.getBoolean(PREF_SECTOR_TONES_ENABLED, defaults.sectorTonesEnabled),
       speakCoaching = preferences.getBoolean(PREF_SPEAK_COACHING, defaults.speakCoaching),
@@ -190,9 +238,13 @@ class TimingServiceRepository(context: Context) : TimingRepository {
     const val PREFERENCES_NAME = "announcements"
     const val PREF_AUTO_RECONNECT = "autoReconnect"
     const val PREF_COACH_ENABLED = "coachEnabled"
+    const val PREF_LISTEN_FOR_COMMANDS = "listenForCommands"
+    const val PREF_AUTO_DETECT_DRIVER_NAME = "autoDetectDriverName"
     const val PREF_TONES_ENABLED = "tonesEnabled"
     const val PREF_SPEAK_LAST = "speakLastComparison"
     const val PREF_SPEAK_BEST = "speakBestComparison"
+    const val PREF_SPEAK_GAPS = "speakGaps"
+    const val PREF_SPEAK_GAP_KART_NUMBERS = "speakGapKartNumbers"
     const val PREF_SPEAK_SECTOR_DELTAS = "speakSectorDeltas"
     const val PREF_SECTOR_TONES_ENABLED = "sectorTonesEnabled"
     const val PREF_SPEAK_COACHING = "speakCoaching"

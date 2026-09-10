@@ -1,12 +1,16 @@
 package com.example.lapbot.service
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.os.Build
 import android.os.IBinder
 import android.speech.tts.TextToSpeech
@@ -14,6 +18,7 @@ import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.example.lapbot.MainActivity
 import com.example.lapbot.data.AlphaRaceHubRepository
 import com.example.lapbot.data.ClubspeedTimingRepository
@@ -22,13 +27,16 @@ import com.example.lapbot.data.ConnectionStatus
 import com.example.lapbot.data.CoachingObjectiveUiState
 import com.example.lapbot.data.DemoTimingReplay
 import com.example.lapbot.data.ReconnectPolicy
+import com.example.lapbot.data.RelativeOpportunityUiState
 import com.example.lapbot.data.TimingServiceState
 import com.example.lapbot.data.TimingRepository
 import com.example.lapbot.data.TimingTracks
 import com.example.lapbot.data.TimingUiState
+import com.example.lapbot.data.TeamSportTimingRepository
 import com.example.lapbot.data.ToneMetric
 import com.example.lapbot.data.ToneSettings
 import com.example.lapbot.data.canonicalKartNumber
+import com.example.lapbot.data.findDriverByNameFragment
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -49,18 +57,24 @@ class TimingStreamService : Service() {
   private var foreground = false
   private var textToSpeech: TextToSpeech? = null
   private var textToSpeechReady = false
+  private lateinit var voiceCommandListener: VoiceCommandListener
+  private var voiceCommandListening = false
+  private var commandAcknowledgement: ToneGenerator? = null
   private var pendingAnnouncement: PendingAnnouncement? = null
   private lateinit var tonePlayer: TonePlayer
   private lateinit var sectorSoundPlayer: SectorSoundPlayer
   private val utteranceCompletions = ConcurrentHashMap<String, UtteranceCompletion>()
   private var pendingToneLap: Int? = null
   private var pendingToneSpeechComplete = false
+  private var gapAnnouncementJob: Job? = null
   private val observedCompletedLaps = mutableMapOf<String, Int>()
   private val knownDriverIds = mutableSetOf<String>()
   private val observedSectorUpdates = mutableSetOf<SectorUpdateKey>()
   private var observedSectorKartNumber: String? = null
   private val sessionCoach = SessionCoach()
   private var coachingObjectiveUi = CoachingObjectiveUiState()
+  private var relativeOpportunityUi = RelativeOpportunityUiState()
+  private var coachingSessionKey: String? = null
   private var demoActive = false
   private var demoJob: Job? = null
 
@@ -70,6 +84,8 @@ class TimingStreamService : Service() {
     TimingServiceState.running = true
     tonePlayer = TonePlayer(scope)
     sectorSoundPlayer = SectorSoundPlayer(this)
+    commandAcknowledgement = ToneGenerator(AudioManager.STREAM_MUSIC, 80)
+    voiceCommandListener = VoiceCommandListener(this, ::handleVoiceCommand)
     notificationManager = getSystemService(NotificationManager::class.java)
     createNotificationChannel()
     textToSpeech =
@@ -83,7 +99,9 @@ class TimingStreamService : Service() {
       }
     textToSpeech?.setOnUtteranceProgressListener(
       object : UtteranceProgressListener() {
-        override fun onStart(utteranceId: String) = Unit
+        override fun onStart(utteranceId: String) {
+          voiceCommandListener.pauseForPlayback()
+        }
 
         override fun onDone(utteranceId: String) {
           val completion = utteranceCompletions.remove(utteranceId) ?: return
@@ -93,6 +111,7 @@ class TimingStreamService : Service() {
               playPendingTones(TimingServiceState.mutableState.value)
             }
             if (completion.stopServiceAfter && !foreground) stopSelf()
+            voiceCommandListener.resumeAfterPlayback()
           }
         }
 
@@ -101,6 +120,7 @@ class TimingStreamService : Service() {
           scope.launch {
             clearPendingTone(completion?.lap)
             if (completion?.stopServiceAfter == true && !foreground) stopSelf()
+            voiceCommandListener.resumeAfterPlayback()
           }
         }
 
@@ -109,6 +129,7 @@ class TimingStreamService : Service() {
           scope.launch {
             clearPendingTone(completion?.lap)
             if (completion?.stopServiceAfter == true && !foreground) stopSelf()
+            voiceCommandListener.resumeAfterPlayback()
           }
         }
       },
@@ -129,20 +150,38 @@ class TimingStreamService : Service() {
       nextRepository.state.collectLatest { repositoryState ->
         if (demoActive) return@collectLatest
         val settings = TimingServiceState.mutableState.value
+        val autoDetectedKartNumber =
+          settings.autoDetectDriverName?.let { fragment ->
+            findDriverByNameFragment(repositoryState.rows, fragment)?.number?.let(::canonicalKartNumber)
+          }
         val state =
           repositoryState.copy(
             autoReconnect = settings.autoReconnect,
             tailLimit = settings.tailLimit,
             reconnectPolicy = settings.reconnectPolicy,
-            selectedKartNumber = settings.selectedKartNumber,
+            selectedKartNumber =
+              if (settings.autoDetectDriverName != null) autoDetectedKartNumber else settings.selectedKartNumber,
+            autoDetectDriverName = settings.autoDetectDriverName,
             metricsSinceLap = settings.metricsSinceLap,
             coachEnabled = settings.coachEnabled,
+            listenForCommands = settings.listenForCommands,
             announcementSettings = settings.announcementSettings,
             toneSettings = settings.toneSettings,
             jsonTail = repositoryState.jsonTail.takeLast(settings.tailLimit),
           )
+        if (state.sessionKey != null && coachingSessionKey != state.sessionKey) {
+          gapAnnouncementJob?.cancel()
+          sessionCoach.reset()
+          coachingObjectiveUi = CoachingObjectiveUiState()
+          relativeOpportunityUi = RelativeOpportunityUiState()
+          observedCompletedLaps.clear()
+          knownDriverIds.clear()
+          observedSectorUpdates.clear()
+          coachingSessionKey = state.sessionKey
+        }
         observeCompletedLaps(state)
-        TimingServiceState.mutableState.value = state.copy(coachingObjective = coachingObjectiveUi)
+        TimingServiceState.mutableState.value =
+          state.copy(coachingObjective = coachingObjectiveUi, relativeOpportunity = relativeOpportunityUi)
         playPendingTones(state)
         if (foreground) notificationManager.notify(NOTIFICATION_ID, streamNotification(state))
       }
@@ -160,17 +199,22 @@ class TimingStreamService : Service() {
         knownDriverIds.clear()
         observedSectorUpdates.clear()
         observedSectorKartNumber = null
+        gapAnnouncementJob?.cancel()
         sessionCoach.reset()
         coachingObjectiveUi = CoachingObjectiveUiState()
+        relativeOpportunityUi = RelativeOpportunityUiState()
+        coachingSessionKey = null
         startInForeground()
         val trackId = intent.getStringExtra(EXTRA_TRACK_ID) ?: TimingTracks.BuckmorePark.id
         val track = TimingTracks.find(trackId) ?: TimingTracks.BuckmorePark
         val nextRepository =
           when (track.id) {
             TimingTracks.DaytonaSandownParkGp.id -> ClubspeedTimingRepository()
+            TimingTracks.TeamSportFarnborough.id -> TeamSportTimingRepository()
             else -> AlphaRaceHubRepository()
           }
         configureRepository(nextRepository, connect = true, trackId = track.id)
+        syncVoiceCommandListening()
       }
       ACTION_START_DEMO -> startDemo()
       ACTION_DISCONNECT -> stopStreaming()
@@ -203,6 +247,13 @@ class TimingStreamService : Service() {
           )
       ACTION_PLAY_TEST_TONES -> playTones(TimingServiceState.mutableState.value)
       ACTION_PREVIEW_ANNOUNCEMENT -> previewAnnouncement()
+      ACTION_SET_LISTEN_FOR_COMMANDS -> {
+        TimingServiceState.mutableState.value =
+          TimingServiceState.mutableState.value.copy(
+            listenForCommands = intent.getBooleanExtra(EXTRA_LISTEN_FOR_COMMANDS, false),
+          )
+        syncVoiceCommandListening()
+      }
     }
     return START_NOT_STICKY
   }
@@ -232,20 +283,56 @@ class TimingStreamService : Service() {
     repository?.close()
     tonePlayer.stop()
     sectorSoundPlayer.release()
+    voiceCommandListener.release()
+    commandAcknowledgement?.release()
     textToSpeech?.shutdown()
     scope.cancel()
     super.onDestroy()
   }
 
   private fun startInForeground() {
-    if (foreground) return
     val notification = streamNotification(TimingUiState(status = ConnectionStatus.Connecting))
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-      startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+      val types =
+        ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or
+          if (voiceCommandListening) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0
+      startForeground(NOTIFICATION_ID, notification, types)
     } else {
       startForeground(NOTIFICATION_ID, notification)
     }
     foreground = true
+  }
+
+  private fun syncVoiceCommandListening() {
+    val requested = TimingServiceState.mutableState.value.listenForCommands
+    val hasPermission =
+      ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+    val canAttemptListening = requested && hasPermission
+    // Declare microphone foreground-service ownership before opening the recognizer.
+    voiceCommandListening = canAttemptListening
+    if (foreground) startInForeground()
+    voiceCommandListening = canAttemptListening && voiceCommandListener.start()
+    if (!voiceCommandListening) {
+      voiceCommandListener.stop()
+      if (foreground) startInForeground()
+    }
+    if (requested && !voiceCommandListening) {
+      Log.w(TAG, "Voice commands requested but speech recognition is unavailable")
+      TimingServiceState.mutableState.value = TimingServiceState.mutableState.value.copy(listenForCommands = false)
+    }
+  }
+
+  private fun handleVoiceCommand(command: RaceVoiceCommand) {
+    Log.i(TAG, "Voice command recognised: ${command.name}")
+    commandAcknowledgement?.startTone(ToneGenerator.TONE_PROP_ACK, COMMAND_ACK_DURATION_MS)
+    scope.launch {
+      delay(COMMAND_ACK_SPEECH_DELAY_MS)
+      val sections =
+        when (command) {
+          RaceVoiceCommand.Gaps -> formatGapVoiceCommandSections(TimingServiceState.mutableState.value)
+        }
+      announce(sections)
+    }
   }
 
   private fun observeCompletedLaps(state: com.example.lapbot.data.TimingUiState) {
@@ -254,6 +341,8 @@ class TimingStreamService : Service() {
     if (selectionChanged) {
       observedSectorKartNumber = selectedKartNumber
       observedSectorUpdates.clear()
+      gapAnnouncementJob?.cancel()
+      gapAnnouncementJob = null
     }
     state.rows.forEach { driver ->
       val isNewDriver = knownDriverIds.add(driver.id)
@@ -268,7 +357,10 @@ class TimingStreamService : Service() {
         if (latestCompletedLap != null) {
           // The session snapshot is already useful context. Seed the card without speaking
           // a historical announcement, then continue learning from live updates.
-          coachingObjectiveUi = sessionCoach.onLap(driver, latestCompletedLap, state.announcementSettings.coachingChattiness).objectiveUi
+          val coaching =
+            sessionCoach.onLap(driver, state.rows, latestCompletedLap, state.announcementSettings.coachingChattiness)
+          coachingObjectiveUi = coaching.objectiveUi
+          relativeOpportunityUi = coaching.relativeOpportunityUi
         }
       }
       if (isSelected) observeSectorDeltas(state, driver, seedOnly = selectionChanged || isNewDriver)
@@ -289,9 +381,15 @@ class TimingStreamService : Service() {
           }
         } else null
       val lapCoaching =
-        if (isNewSelectedLap) sessionCoach.onLap(driver, completedLap, state.announcementSettings.coachingChattiness)
-        else CoachingResult(objectiveUi = sessionCoach.objectiveUi(driver.id))
-      if (isSelected) coachingObjectiveUi = lapCoaching.objectiveUi
+        if (isNewSelectedLap) sessionCoach.onLap(driver, state.rows, completedLap, state.announcementSettings.coachingChattiness)
+        else CoachingResult(
+          objectiveUi = sessionCoach.objectiveUi(driver.id),
+          relativeOpportunityUi = sessionCoach.relativeOpportunityUi(),
+        )
+      if (isSelected) {
+        coachingObjectiveUi = lapCoaching.objectiveUi
+        relativeOpportunityUi = lapCoaching.relativeOpportunityUi
+      }
       if (state.coachEnabled && isNewSelectedLap) {
         pendingToneLap = completedLap
         pendingToneSpeechComplete = false
@@ -311,6 +409,20 @@ class TimingStreamService : Service() {
           if (state.announcementSettings.speakCoaching) {
             listOfNotNull(lapCoaching.lapObservation, finalSectorCoaching).maxByOrNull(CoachingObservation::priority)?.text
           } else null
+        val gaps =
+          if (state.supportsGaps && state.announcementSettings.speakGaps) {
+            calculateAdjacentRaceGaps(state.rows, driver, completedLap)
+          } else null
+        val gapSections =
+          if (gaps?.isComplete == true) {
+            formatGapAnnouncementSections(gaps, state.announcementSettings.speakGapKartNumbers)
+          } else emptyList()
+        if (state.supportsGaps && state.announcementSettings.speakGaps && gaps?.isComplete != true) {
+          scheduleGapAnnouncement(driver.id, completedLap, state.sessionKey)
+        } else {
+          gapAnnouncementJob?.cancel()
+          gapAnnouncementJob = null
+        }
         announce(
           formatBudgetedLapAnnouncementSections(
             lapTimeMs = lapTime,
@@ -321,6 +433,7 @@ class TimingStreamService : Service() {
               if (state.announcementSettings.speakBestComparison) bestDelta
               else null,
             coaching = coachingMessage,
+            gapSections = gapSections,
           ),
           lap = completedLap,
           sectorSound =
@@ -335,16 +448,17 @@ class TimingStreamService : Service() {
     lap: Int? = null,
     stopServiceAfter: Boolean = false,
     sectorSound: SectorSound? = null,
+    queueMode: Int = TextToSpeech.QUEUE_FLUSH,
   ) {
     if (sectorSound != null) {
       sectorSoundPlayer.play(sectorSound)
       scope.launch {
         delay(SECTOR_SPEECH_DELAY_MS)
-        announce(sections, lap, stopServiceAfter)
+        announce(sections, lap, stopServiceAfter, queueMode = queueMode)
       }
       return
     }
-    val announcement = PendingAnnouncement(sections, lap, stopServiceAfter)
+    val announcement = PendingAnnouncement(sections, lap, stopServiceAfter, queueMode)
     if (textToSpeechReady) speak(announcement) else pendingAnnouncement = announcement
   }
 
@@ -358,10 +472,40 @@ class TimingStreamService : Service() {
       UtteranceCompletion(announcement.lap, announcement.stopServiceAfter)
     tts.speak(
       announcement.sections.joinToString(separator = ". ", postfix = "."),
-      TextToSpeech.QUEUE_FLUSH,
+      announcement.queueMode,
       null,
       utteranceId,
     )
+  }
+
+  private fun scheduleGapAnnouncement(driverId: String, completedLap: Int, sessionKey: String?) {
+    gapAnnouncementJob?.cancel()
+    gapAnnouncementJob =
+      scope.launch {
+        // Allow the following kart to cross the line and the lap call/tones to finish first.
+        delay(GAP_COHERENCE_DELAY_MS)
+        val state = TimingServiceState.mutableState.value
+        if (
+          state.status != ConnectionStatus.Connected ||
+            !state.coachEnabled ||
+            !state.supportsGaps ||
+            !state.announcementSettings.speakGaps ||
+            state.sessionKey != sessionKey
+        ) return@launch
+        val selected =
+          state.rows.firstOrNull {
+            it.id == driverId &&
+              it.lap == completedLap &&
+              canonicalKartNumber(it.number) == state.selectedKartNumber
+          } ?: return@launch
+        val sections =
+          formatGapAnnouncementSections(
+            calculateAdjacentRaceGaps(state.rows, selected, completedLap),
+            includeKartNumbers = state.announcementSettings.speakGapKartNumbers,
+          )
+        if (sections.isNotEmpty()) announce(sections = sections, queueMode = TextToSpeech.QUEUE_ADD)
+        gapAnnouncementJob = null
+      }
   }
 
   private fun configureVoice(tts: TextToSpeech, gender: AnnouncementVoiceGender) {
@@ -405,14 +549,24 @@ class TimingStreamService : Service() {
   }
 
   private fun previewAnnouncement() {
+    val state = TimingServiceState.mutableState.value
     announce(
       sections =
-        listOf(
-          "Great lap",
-          "52 point 34",
-          "Point 22 quicker than last",
-          "Biggest gain, sector two, point 18",
-        ),
+        buildList {
+          add("Great lap")
+          add("52 point 34")
+          add("Point 22 quicker than last")
+          if (state.supportsGaps && state.announcementSettings.speakGaps) {
+            if (state.announcementSettings.speakGapKartNumbers) {
+              add("Gap to P3, kart 12, 1 point 20")
+              add("Gap to P5, kart 27, point 33")
+            } else {
+              add("Gap to P3, 1 point 20")
+              add("Gap to P5, point 33")
+            }
+          }
+          add("Biggest gain, sector two, point 18")
+        },
       stopServiceAfter = !foreground,
     )
   }
@@ -451,6 +605,7 @@ class TimingStreamService : Service() {
     Log.i(TAG, "Starting demo replay for session 837888")
     demoActive = true
     demoJob?.cancel()
+    gapAnnouncementJob?.cancel()
     repository?.disconnect()
     observedCompletedLaps.clear()
     knownDriverIds.clear()
@@ -458,6 +613,8 @@ class TimingStreamService : Service() {
     observedSectorKartNumber = null
     sessionCoach.reset()
     coachingObjectiveUi = CoachingObjectiveUiState()
+    relativeOpportunityUi = RelativeOpportunityUiState()
+    coachingSessionKey = "demo:837888"
     pendingToneLap = null
     pendingToneSpeechComplete = false
     startInForeground()
@@ -469,14 +626,22 @@ class TimingStreamService : Service() {
         status = ConnectionStatus.Connected,
         isDemo = true,
         selectedTrackId = TimingTracks.BuckmorePark.id,
+        sessionKey = coachingSessionKey,
         supportsSectors = true,
+        supportsGaps = true,
         rows = replay.initialRows(),
         jsonTail = emptyList(),
-        selectedKartNumber = "5",
+        selectedKartNumber =
+          if (settings.autoDetectDriverName != null) {
+            findDriverByNameFragment(replay.initialRows(), settings.autoDetectDriverName)?.number?.let(::canonicalKartNumber)
+          } else {
+            "5"
+          },
         error = null,
       )
     observeCompletedLaps(initial)
-    TimingServiceState.mutableState.value = initial.copy(coachingObjective = coachingObjectiveUi)
+    TimingServiceState.mutableState.value =
+      initial.copy(coachingObjective = coachingObjectiveUi, relativeOpportunity = relativeOpportunityUi)
     notificationManager.notify(NOTIFICATION_ID, streamNotification(initial))
 
     demoJob =
@@ -494,7 +659,8 @@ class TimingStreamService : Service() {
               error = null,
             )
           observeCompletedLaps(state)
-          TimingServiceState.mutableState.value = state.copy(coachingObjective = coachingObjectiveUi)
+          TimingServiceState.mutableState.value =
+            state.copy(coachingObjective = coachingObjectiveUi, relativeOpportunity = relativeOpportunityUi)
           playPendingTones(state)
           if (foreground) notificationManager.notify(NOTIFICATION_ID, streamNotification(state))
           delay(frame.nextDelayMs)
@@ -505,17 +671,23 @@ class TimingStreamService : Service() {
   private fun stopStreaming() {
     demoActive = false
     demoJob?.cancel()
+    gapAnnouncementJob?.cancel()
     repository?.disconnect()
     observedSectorUpdates.clear()
     observedSectorKartNumber = null
     sessionCoach.reset()
     coachingObjectiveUi = CoachingObjectiveUiState()
+    relativeOpportunityUi = RelativeOpportunityUiState()
+    coachingSessionKey = null
+    voiceCommandListener.stop()
+    voiceCommandListening = false
     TimingServiceState.mutableState.value =
       TimingServiceState.mutableState.value.copy(
         status = ConnectionStatus.Disconnected,
         isDemo = false,
         selectedTrackId = null,
         supportsSectors = true,
+        supportsGaps = true,
         error = null,
       )
     stopForeground(STOP_FOREGROUND_REMOVE)
@@ -578,6 +750,7 @@ class TimingStreamService : Service() {
     const val ACTION_SET_TONE_SETTINGS = "com.example.lapbot.action.SET_TONE_SETTINGS"
     const val ACTION_PLAY_TEST_TONES = "com.example.lapbot.action.PLAY_TEST_TONES"
     const val ACTION_PREVIEW_ANNOUNCEMENT = "com.example.lapbot.action.PREVIEW_ANNOUNCEMENT"
+    const val ACTION_SET_LISTEN_FOR_COMMANDS = "com.example.lapbot.action.SET_LISTEN_FOR_COMMANDS"
     const val EXTRA_AUTO_RECONNECT = "autoReconnect"
     const val EXTRA_TAIL_LIMIT = "tailLimit"
     const val EXTRA_INITIAL_DELAY_MS = "initialDelayMs"
@@ -589,11 +762,15 @@ class TimingStreamService : Service() {
     const val EXTRA_LAP_DURATION_MS = "lapDurationMs"
     const val EXTRA_SECTOR_DURATION_MS = "sectorDurationMs"
     const val EXTRA_TRACK_ID = "trackId"
+    const val EXTRA_LISTEN_FOR_COMMANDS = "listenForCommands"
     private const val DEFAULT_TAIL_LIMIT = 20
     private const val CHANNEL_ID = "live_timing"
     private const val NOTIFICATION_ID = 1001
     private const val NATURAL_SPEECH_PITCH = 0.98f
     private const val SECTOR_SPEECH_DELAY_MS = 1_000L
+    private const val GAP_COHERENCE_DELAY_MS = 5_000L
+    private const val COMMAND_ACK_DURATION_MS = 150
+    private const val COMMAND_ACK_SPEECH_DELAY_MS = 220L
   }
 }
 
@@ -601,6 +778,7 @@ private data class PendingAnnouncement(
   val sections: List<String>,
   val lap: Int?,
   val stopServiceAfter: Boolean,
+  val queueMode: Int,
 )
 
 private data class UtteranceCompletion(
@@ -609,6 +787,24 @@ private data class UtteranceCompletion(
 )
 
 private data class SectorUpdateKey(val driverId: String, val lap: Int, val sector: Int)
+
+internal fun formatGapVoiceCommandSections(state: TimingUiState): List<String> {
+  if (state.status != ConnectionStatus.Connected) return listOf("Live timing is not connected")
+  if (!state.supportsGaps) return listOf("Gap information is not available for this track")
+  val selectedKartNumber = canonicalKartNumber(state.selectedKartNumber)
+    ?: return listOf("Pick a driver in focus first")
+  val selected =
+    state.rows.firstOrNull { canonicalKartNumber(it.number) == selectedKartNumber }
+      ?: return listOf("The driver in focus is not in the current session")
+  val completedLap = selected.gapRecordedAtLap ?: selected.recentCompletedLap ?: selected.lap
+    ?: return listOf("Gaps are not available yet")
+  val sections =
+    formatGapAnnouncementSections(
+      calculateAdjacentRaceGaps(state.rows, selected, completedLap),
+      includeKartNumbers = state.announcementSettings.speakGapKartNumbers,
+    )
+  return sections.ifEmpty { listOf("Gaps are not available yet") }
+}
 
 internal data class SectorDelta(val sector: Int, val sectorTimeMs: Long, val deltaMs: Long) {
   val isNewBest: Boolean
@@ -715,6 +911,7 @@ internal fun formatBudgetedLapAnnouncementSections(
   lastDeltaMs: Long?,
   bestDeltaMs: Long?,
   coaching: String?,
+  gapSections: List<String> = emptyList(),
 ): List<String> =
   buildList {
     add(formatSpokenHundredths(lapTimeMs))
@@ -731,8 +928,9 @@ internal fun formatBudgetedLapAnnouncementSections(
           else -> null
         }
       selectedComparison?.let { (delta, formatter) -> add(formatter(delta)) }
-      add(coaching)
     }
+    addAll(gapSections)
+    coaching?.let(::add)
   }
 
 private fun formatLastComparison(milliseconds: Long): String =
