@@ -31,7 +31,10 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.suspendCancellableCoroutine
 
-class AlphaRaceHubRepository(private val site: String = "buckmore") : TimingRepository {
+class AlphaRaceHubRepository(
+  private val site: String = "buckmore",
+  private val track: TimingTrack = TimingTracks.BuckmorePark,
+) : TimingRepository {
   private val json = Json { ignoreUnknownKeys = true }
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
   private val client =
@@ -56,17 +59,23 @@ class AlphaRaceHubRepository(private val site: String = "buckmore") : TimingRepo
   private var wantsConnection = false
   private var reconnectJob: Job? = null
   private var backoffResetJob: Job? = null
+  private var timingSessionGeneration = 0
+  private var timingSessionKey: String? = null
 
-  override fun connect() {
+  override fun connect(trackId: String) {
     scope.launch {
       if (mutableState.value.status != ConnectionStatus.Disconnected) return@launch
       Log.i(TAG, "Connect requested")
+      timingSessionGeneration += 1
+      timingSessionKey = "alpha:$site:$timingSessionGeneration"
       wantsConnection = true
       reconnectBackoff.reset()
       generation += 1
       open(generation, reconnecting = false)
     }
   }
+
+  override fun startDemo() = Unit
 
   override fun disconnect() {
     scope.launch {
@@ -113,16 +122,40 @@ class AlphaRaceHubRepository(private val site: String = "buckmore") : TimingRepo
   }
 
   override fun setSelectedKartNumber(kartNumber: String?) {
-    scope.launch { mutableState.value = mutableState.value.copy(selectedKartNumber = canonicalKartNumber(kartNumber)) }
+    scope.launch {
+      mutableState.value =
+        mutableState.value.copy(selectedKartNumber = canonicalKartNumber(kartNumber), autoDetectDriverName = null)
+    }
+  }
+
+  override fun setAutoDetectDriverName(nameFragment: String?) {
+    scope.launch {
+      val canonical = canonicalDriverNameFragment(nameFragment)
+      mutableState.value =
+        mutableState.value.copy(
+          autoDetectDriverName = canonical,
+          selectedKartNumber = findDriverByNameFragment(mutableState.value.rows, canonical)?.number?.let(::canonicalKartNumber),
+        )
+    }
   }
 
   override fun setMetricsSinceLap(lap: Int?) {
     scope.launch { mutableState.value = mutableState.value.copy(metricsSinceLap = lap) }
   }
 
-  override fun setAudioAnnouncements(enabled: Boolean) {
-    scope.launch { mutableState.value = mutableState.value.copy(audioAnnouncements = enabled) }
+  override fun setCoachEnabled(enabled: Boolean) {
+    scope.launch { mutableState.value = mutableState.value.copy(coachEnabled = enabled) }
   }
+
+  override fun setListenForCommands(enabled: Boolean) {
+    scope.launch { mutableState.value = mutableState.value.copy(listenForCommands = enabled) }
+  }
+
+  override fun setAnnouncementSettings(settings: AnnouncementSettings) {
+    scope.launch { mutableState.value = mutableState.value.copy(announcementSettings = settings) }
+  }
+
+  override fun previewAnnouncement() = Unit
 
   override fun setToneSettings(settings: ToneSettings) {
     scope.launch { mutableState.value = mutableState.value.copy(toneSettings = settings) }
@@ -138,9 +171,13 @@ class AlphaRaceHubRepository(private val site: String = "buckmore") : TimingRepo
   }
 
   private suspend fun open(activeGeneration: Int, reconnecting: Boolean) {
-    mutableState.value =
-      mutableState.value.copy(
-        status = if (reconnecting) ConnectionStatus.Reconnecting else ConnectionStatus.Connecting,
+      mutableState.value =
+        mutableState.value.copy(
+          status = if (reconnecting) ConnectionStatus.Reconnecting else ConnectionStatus.Connecting,
+          selectedTrackId = track.id,
+          sessionKey = timingSessionKey,
+          supportsSectors = track.supportsSectors,
+          supportsGaps = track.supportsGaps,
         error = null,
         jsonTail = if (reconnecting) mutableState.value.jsonTail else emptyList(),
       )
@@ -264,7 +301,17 @@ class AlphaRaceHubRepository(private val site: String = "buckmore") : TimingRepo
           }
         "pusher:ping" -> webSocket.send("{\"event\":\"pusher:pong\",\"data\":{}}")
         "token" -> token = data?.jsonObject?.get("token")?.jsonPrimitive?.content ?: token
-        "new_session", "refresh" -> {
+        "new_session" -> {
+          val eventId = data?.jsonObject?.get("eventUuid")?.jsonPrimitive?.content
+          timingSessionGeneration += 1
+          timingSessionKey = eventId?.let { "alpha:$site:$it" } ?: "alpha:$site:$timingSessionGeneration"
+          mutableState.value =
+            mutableState.value.copy(
+              sessionKey = timingSessionKey,
+              rows = replaceSnapshot(getCurrent(eventId), event.orEmpty()),
+            )
+        }
+        "refresh" -> {
           val eventId = data?.jsonObject?.get("eventUuid")?.jsonPrimitive?.content
           mutableState.value =
             mutableState.value.copy(rows = replaceSnapshot(getCurrent(eventId), event.orEmpty()))

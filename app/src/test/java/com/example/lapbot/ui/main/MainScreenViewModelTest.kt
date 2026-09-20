@@ -1,10 +1,12 @@
 package com.example.lapbot.ui.main
 
 import com.example.lapbot.data.ConnectionStatus
+import com.example.lapbot.data.AnnouncementSettings
 import com.example.lapbot.data.TimingRepository
 import com.example.lapbot.data.TimingUiState
 import com.example.lapbot.data.ReconnectPolicy
 import com.example.lapbot.data.ToneSettings
+import com.example.lapbot.data.findDriverByNameFragment
 import junit.framework.TestCase.assertEquals
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.Test
@@ -21,18 +23,43 @@ class MainScreenViewModelTest {
   }
 
   @Test
-  fun autoReconnect_isOffByDefault() {
+  fun autoReconnect_isOnByDefault() {
     val viewModel = MainScreenViewModel(FakeTimingRepository())
 
-    assertEquals(false, viewModel.uiState.value.autoReconnect)
+    assertEquals(true, viewModel.uiState.value.autoReconnect)
+  }
+
+  @Test
+  fun previewAnnouncement_isForwardedToRepository() {
+    val repository = FakeTimingRepository()
+    val viewModel = MainScreenViewModel(repository)
+
+    viewModel.previewAnnouncement()
+
+    assertEquals(1, repository.previewCount)
+  }
+
+  @Test
+  fun listenForCommands_isForwardedToRepository() {
+    val repository = FakeTimingRepository()
+    val viewModel = MainScreenViewModel(repository)
+
+    viewModel.setListenForCommands(true)
+
+    assertEquals(true, viewModel.uiState.value.listenForCommands)
   }
 }
 
 private class FakeTimingRepository : TimingRepository {
   override val state = MutableStateFlow(TimingUiState())
+  var previewCount = 0
 
-  override fun connect() {
-    state.value = state.value.copy(status = ConnectionStatus.Connecting)
+  override fun connect(trackId: String) {
+    state.value = state.value.copy(status = ConnectionStatus.Connecting, selectedTrackId = trackId)
+  }
+
+  override fun startDemo() {
+    state.value = state.value.copy(status = ConnectionStatus.Connected, isDemo = true)
   }
 
   override fun disconnect() {
@@ -52,15 +79,35 @@ private class FakeTimingRepository : TimingRepository {
   }
 
   override fun setSelectedKartNumber(kartNumber: String?) {
-    state.value = state.value.copy(selectedKartNumber = kartNumber)
+    state.value = state.value.copy(selectedKartNumber = kartNumber, autoDetectDriverName = null)
+  }
+
+  override fun setAutoDetectDriverName(nameFragment: String?) {
+    state.value =
+      state.value.copy(
+        autoDetectDriverName = nameFragment,
+        selectedKartNumber = findDriverByNameFragment(state.value.rows, nameFragment)?.number,
+      )
   }
 
   override fun setMetricsSinceLap(lap: Int?) {
     state.value = state.value.copy(metricsSinceLap = lap)
   }
 
-  override fun setAudioAnnouncements(enabled: Boolean) {
-    state.value = state.value.copy(audioAnnouncements = enabled)
+  override fun setCoachEnabled(enabled: Boolean) {
+    state.value = state.value.copy(coachEnabled = enabled)
+  }
+
+  override fun setListenForCommands(enabled: Boolean) {
+    state.value = state.value.copy(listenForCommands = enabled)
+  }
+
+  override fun setAnnouncementSettings(settings: AnnouncementSettings) {
+    state.value = state.value.copy(announcementSettings = settings)
+  }
+
+  override fun previewAnnouncement() {
+    previewCount += 1
   }
 
   override fun setToneSettings(settings: ToneSettings) {

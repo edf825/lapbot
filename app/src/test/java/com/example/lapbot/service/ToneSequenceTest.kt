@@ -13,6 +13,29 @@ import org.junit.Test
 
 class ToneSequenceTest {
   @Test
+  fun lapOnlyTracksProduceOnlyReferenceAndLapTones() {
+    val state =
+      TimingUiState(
+        supportsSectors = false,
+        selectedKartNumber = "5",
+        rows =
+          listOf(
+            TimingRow(
+              id = "5",
+              number = "5",
+              lapHistory = listOf(LapHistoryEntry(2, 52_000), LapHistoryEntry(1, 52_500)),
+            ),
+          ),
+        toneSettings = ToneSettings(metric = ToneMetric.PreviousLap),
+      )
+
+    val sequence = requireNotNull(buildToneSequence(state))
+
+    assertEquals(2, sequence.frequenciesHz.size)
+    assertEquals(listOf(200, 300), sequence.durationsMs)
+  }
+
+  @Test
   fun kartNumbersAreNormalizedWithoutNameMatching() {
     assertEquals("7", canonicalKartNumber("007"))
     assertEquals("A7", canonicalKartNumber(" A7 "))
@@ -46,6 +69,13 @@ class ToneSequenceTest {
   @Test
   fun tonesAreSkippedWhenCompleteMetricsBelongToAnEarlierLap() {
     assertNull(buildToneSequence(state(ToneMetric.DriverBest), expectedLap = 11))
+  }
+
+  @Test
+  fun tonesAreSkippedWhenPlaybackIsDisabled() {
+    val state = state(ToneMetric.DriverBest).copy(toneSettings = ToneSettings(enabled = false))
+
+    assertNull(buildToneSequence(state))
   }
 
   private fun state(metric: ToneMetric): TimingUiState =
