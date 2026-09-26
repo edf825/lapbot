@@ -37,6 +37,7 @@ The generated APK will be at `app/build/outputs/apk/debug/app-debug.apk`.
 4. Open `Engineer Settings` for lap-call, adjacent-position gap, comparison, voice, and tone configuration.
 5. Enable `Pitlane Mode` in the Race Engineer sheet for the live objective, comparison, and lap-history view used by someone monitoring the race.
 6. Optionally disable performance tones, choose their comparison metric, configure tone durations, or set `Metrics since lap` for a driver stint.
+7. Open `Sessions` after a run to review automatically recorded pace, consistency, optimal lap, relative opportunities, and lap progression.
 
 Daytona's Clubspeed feed and TeamSport Farnborough's SMS-Timing feed provide
 completed lap times but no sector splits. On those circuits Lapbot hides
@@ -44,6 +45,20 @@ sector-only columns, coaching, controls, and tones;
 lap history is collected from the updates received while connected.
 
 Lap announcements and tones continue while the app is backgrounded.
+
+## Session recording and debrief
+
+Lapbot automatically creates a local recording once the driver in focus has a
+meaningful completed lap. It stores normalized lap and sector timing, available
+position/gap evidence, the final comparison field, Race Engineer objectives,
+observations, and announcements. Empty connection attempts are not retained.
+
+Sessions are stored only on the device and shown newest first. A debrief leads
+with best and repeatable pace, consistency, demonstrated optimal, credible
+front-runner comparison, and a simple lap progression chart. Slow incident or
+traffic laps are highlighted and excluded from the main pace/trend assessment.
+Debug builds can replay a recorded session through the normal Race Engineer
+pipeline from its debrief.
 
 ## Replay a past session
 

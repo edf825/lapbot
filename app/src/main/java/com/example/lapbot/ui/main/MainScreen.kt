@@ -101,6 +101,7 @@ import kotlin.math.absoluteValue
 fun LiveTimingsScreen(
   onDriverClick: (String) -> Unit,
   onRaceEngineerClick: () -> Unit,
+  onSessionsClick: () -> Unit,
   modifier: Modifier = Modifier,
 ) {
   val context = LocalContext.current
@@ -117,6 +118,7 @@ fun LiveTimingsScreen(
     onReconnectPolicyChange = viewModel::setReconnectPolicy,
     onDriverClick = onDriverClick,
     onRaceEngineerClick = onRaceEngineerClick,
+    onSessionsClick = onSessionsClick,
     modifier = modifier,
   )
 }
@@ -134,6 +136,7 @@ internal fun LiveTimingsScreen(
   onReconnectPolicyChange: (ReconnectPolicy) -> Unit,
   onDriverClick: (String) -> Unit,
   onRaceEngineerClick: () -> Unit,
+  onSessionsClick: () -> Unit = {},
   modifier: Modifier = Modifier,
 ) {
   var selectedTrackId by rememberSaveable {
@@ -163,6 +166,7 @@ internal fun LiveTimingsScreen(
           onDisconnect()
         },
         onShowDebugTools = { showDebugTools = true },
+        onSessionsClick = onSessionsClick,
         onConfigure = {
           pendingAutoReconnect = state.autoReconnect
           pendingTailLimit = state.tailLimit.toFloat()
@@ -1243,13 +1247,17 @@ private fun ConnectionPanel(
   demoEnabled: Boolean,
   onDisconnect: () -> Unit,
   onShowDebugTools: () -> Unit,
+  onSessionsClick: () -> Unit,
   onConfigure: () -> Unit,
 ) {
   var trackMenuExpanded by remember { mutableStateOf(false) }
   Column(Modifier.fillMaxWidth()) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
       Text("Lapbot", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-      if (demoEnabled) TextButton(onClick = onShowDebugTools) { Text("Debug tools") }
+      Row {
+        TextButton(onClick = onSessionsClick) { Text("Sessions") }
+        if (demoEnabled) TextButton(onClick = onShowDebugTools) { Text("Debug tools") }
+      }
     }
     ConnectionControl(
       state = state,
@@ -1265,7 +1273,7 @@ private fun ConnectionPanel(
     )
     if (state.isDemo) {
       Text(
-        "Session 837888 · kart #5 John Reeves · replayed at 2× speed",
+        state.replayDescription ?: "Recorded timing replay",
         color = MaterialTheme.colorScheme.primary,
         style = MaterialTheme.typography.bodySmall,
       )

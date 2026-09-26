@@ -172,6 +172,10 @@ class VoiceCommandSpikeActivity : ComponentActivity() {
   private fun commandResponse(command: RaceVoiceCommand): String =
     when (command) {
       RaceVoiceCommand.Gaps -> "Gap to P3, kart 12, 1 point 20. Gap to P5, kart 27, point 33"
+      RaceVoiceCommand.SpeakMore -> "Coaching detail, high"
+      RaceVoiceCommand.SpeakLess -> "Coaching detail, low"
+      RaceVoiceCommand.SectorsOn -> "Sector times on"
+      RaceVoiceCommand.SectorsOff -> "Sector times off"
     }
 
   private fun speak(message: String) {

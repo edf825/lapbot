@@ -15,7 +15,7 @@ import kotlin.math.sin
 internal class TonePlayer(private val scope: CoroutineScope) {
   private var playbackJob: Job? = null
 
-  fun play(sequence: ToneSequence) {
+  fun play(sequence: ToneSequence, onComplete: () -> Unit = {}) {
     playbackJob?.cancel()
     playbackJob =
       scope.launch(Dispatchers.IO) {
@@ -43,6 +43,7 @@ internal class TonePlayer(private val scope: CoroutineScope) {
         } finally {
           runCatching { track.stop() }
           track.release()
+          scope.launch { onComplete() }
         }
       }
   }

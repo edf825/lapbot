@@ -28,7 +28,9 @@ object TimingTracks {
     )
   val TeamSportFarnborough =
     TimingTrack("teamsport-farnborough", "TeamSport Farnborough", supportsSectors = false, supportsGaps = true)
-  val All = listOf(BuckmorePark, DaytonaSandownParkGp, TeamSportFarnborough)
+  val TeamSportLeicester =
+    TimingTrack("teamsport-leicester", "TeamSport Leicester", supportsSectors = false, supportsGaps = true)
+  val All = listOf(BuckmorePark, DaytonaSandownParkGp, TeamSportFarnborough, TeamSportLeicester)
 
   fun find(id: String?): TimingTrack? = All.firstOrNull { it.id == id }
 }
@@ -131,6 +133,7 @@ data class LapTimelineEntry(
 data class TimingUiState(
   val status: ConnectionStatus = ConnectionStatus.Disconnected,
   val isDemo: Boolean = false,
+  val replayDescription: String? = null,
   val autoReconnect: Boolean = true,
   val selectedTrackId: String? = null,
   val sessionKey: String? = null,

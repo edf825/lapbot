@@ -124,6 +124,8 @@ This document records the intended behavior of the Lapbot Android app. It is the
 - Provide a persistent, default-off `Speak gaps` switch for every supported track. Provide a separate persistent, default-off `Include kart numbers` option so an adjacent-position call can identify the occupying kart, for example, `Gap to P3, kart 12, 1 point 20`. On a selected-driver lap completion, announce the authoritative interval to the immediately preceding and following race positions when both timing measurements describe the same completed lap. Prefer a provider interval, otherwise subtract provider gaps-to-leader; Buckmore may fall back to complete accumulated same-session lap histories. Suppress unavailable, negative, lapped, incomplete, or temporally mismatched comparisons rather than estimating them.
 - Provide one default-off `Speak coaching` switch in Engineer Settings. It is independent from `Speak sector timing`: coaching may speak a concise objective-sector observation without reading the raw sector time.
 - Provide a persistent coaching-detail choice: Low, Medium, or High. Low is the default and preserves the sparsest cadence; higher levels increase insight frequency without lowering evidence standards or exceeding the spoken-message budget.
+- While command listening is enabled, accept `Lapbot, speak more` and `Lapbot, speak less`, move coaching detail one level with Low/High clamping, persist the result, and confirm the resulting level as Low, Mid, or High through the shared audio queue.
+- Accept `Lapbot, sectors on` and `Lapbot, sectors off`, persistently toggle spoken sector timing, and confirm the resulting state through the shared audio queue.
 - Treat a sector within 100 ms (one tenth) of the driver's fastest repeatable sector pace as personally consistent, not necessarily high performance. At High coaching detail, use varied, precise recognition and reinforce consecutive qualifying attempts.
 - Reserve `front-running performance` for repeatable sector pace within 0.5% of the credible front-running session reference.
 - Build that reference from up to three credible faster drivers within 0.5% of the fastest repeatable whole-lap pace. Require at least three clustered samples, use the median contributor pace per sector, and stabilize cohort membership across two focused-driver lap evaluations.
@@ -168,6 +170,20 @@ This document records the intended behavior of the Lapbot Android app. It is the
 - Log stream lifecycle, snapshot application, ignored empty snapshots, sequence gaps, explicit clears, and failures under the `LapbotStream` tag.
 - Log foreground service creation, commands, timeout, and destruction under the `LapbotService` tag.
 - Diagnostic logging must identify why timing data was replaced or preserved without dumping private authentication values.
+- Serialize sector, lap, coaching, voice-command responses, and performance tones through one FIFO audio queue. New output must not interrupt active playback, and command listening resumes only after the queue has drained.
+
+## Session Recorder and Debrief
+
+- Begin local recording automatically when a selected driver has at least one meaningful completed lap; never retain empty connection attempts.
+- Persist normalized selected-driver laps and sectors, kart assignments, observed position and coherent adjacent gaps, final field histories, venue/provider, session times, Race Engineer state transitions, observations, and announcements.
+- Continue one driver recording across kart-number changes when the selected driver identity remains stable. Finalize on a source-session or selected-driver change and on explicit disconnect.
+- Store recordings as versioned, provider-independent, atomic local records. Retain the newest 100 sessions and do not introduce accounts or cloud synchronization.
+- Provide a top-level Sessions destination ordered newest first, showing venue, start time, selected driver, best lap, final meaningful position, and recorded lap count.
+- Lead each debrief with best lap, established repeatable pace, median absolute deviation as consistency, demonstrated optimal lap, best-to-optimal gap, and credible front-running relative pace where established.
+- Identify unusually slow laps conservatively, highlight them, and exclude them from repeatable pace, consistency, optimal-lap, and trend calculations without deleting their detailed evidence.
+- Present deterministic conclusions for the strongest credible sector opportunity, opportunity/objective progress, late-session pace, consistency, and coherent position/gap trends. Explicitly report insufficient evidence rather than infer a cause.
+- Show a glanceable lap progression chart and retain concise per-lap timing, sector, position, and gap detail underneath it.
+- In debuggable builds, allow a stored session to be replayed through the existing normalized timing and Race Engineer pipeline without recording the replay as a new session.
 
 ## Verification
 

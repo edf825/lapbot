@@ -13,6 +13,8 @@ import com.example.lapbot.ui.main.EngineerSettingsScreen
 import com.example.lapbot.ui.main.DriverScreen
 import com.example.lapbot.ui.main.PitlaneModeScreen
 import com.example.lapbot.ui.main.RaceEngineerScreen
+import com.example.lapbot.ui.sessions.SessionDebriefScreen
+import com.example.lapbot.ui.sessions.SessionsScreen
 
 @Composable
 fun MainNavigation() {
@@ -27,6 +29,7 @@ fun MainNavigation() {
           LiveTimingsScreen(
             onDriverClick = { driverId -> backStack.add(Driver(driverId)) },
             onRaceEngineerClick = { backStack.add(RaceEngineer) },
+            onSessionsClick = { backStack.add(Sessions) },
             modifier = Modifier.safeDrawingPadding().padding(12.dp),
           )
         }
@@ -53,6 +56,20 @@ fun MainNavigation() {
         }
         entry<PitlaneMode> {
           PitlaneModeScreen(
+            onBack = { backStack.removeLastOrNull() },
+            modifier = Modifier.safeDrawingPadding().padding(12.dp),
+          )
+        }
+        entry<Sessions> {
+          SessionsScreen(
+            onBack = { backStack.removeLastOrNull() },
+            onSessionClick = { sessionId -> backStack.add(SessionDebrief(sessionId)) },
+            modifier = Modifier.safeDrawingPadding().padding(12.dp),
+          )
+        }
+        entry<SessionDebrief> { key ->
+          SessionDebriefScreen(
+            sessionId = key.sessionId,
             onBack = { backStack.removeLastOrNull() },
             modifier = Modifier.safeDrawingPadding().padding(12.dp),
           )

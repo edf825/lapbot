@@ -303,12 +303,30 @@ class TeamSportTimingRepository(
   internal companion object {
     const val FARNBOROUGH_WEB_SOCKET_URL = "wss://webserver3.sms-timing.com:10015/"
     const val FARNBOROUGH_RESOURCE_KEY = "260831@teamsportfarnborough"
+    const val LEICESTER_WEB_SOCKET_URL = "wss://webserver4.sms-timing.com:10015/"
+    const val LEICESTER_RESOURCE_KEY = "19476@teamsportleicester"
     const val TAG = "LapbotTeamSport"
     const val MIN_TAIL_RECORDS = 5
     const val MAX_TAIL_RECORDS = 100
     const val WEB_SOCKET_PING_SECONDS = 30L
     const val SUBSCRIPTION_TIMEOUT_MS = 15_000L
     const val BACKOFF_RESET_AFTER_MS = 30_000L
+
+    fun forTrack(track: TimingTrack): TeamSportTimingRepository =
+      when (track.id) {
+        TimingTracks.TeamSportLeicester.id ->
+          TeamSportTimingRepository(
+            track = TimingTracks.TeamSportLeicester,
+            webSocketUrl = LEICESTER_WEB_SOCKET_URL,
+            resourceKey = LEICESTER_RESOURCE_KEY,
+          )
+        else ->
+          TeamSportTimingRepository(
+            track = TimingTracks.TeamSportFarnborough,
+            webSocketUrl = FARNBOROUGH_WEB_SOCKET_URL,
+            resourceKey = FARNBOROUGH_RESOURCE_KEY,
+          )
+      }
   }
 }
 

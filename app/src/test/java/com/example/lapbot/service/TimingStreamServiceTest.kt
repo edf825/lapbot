@@ -3,6 +3,7 @@ package com.example.lapbot.service
 import com.example.lapbot.data.AnnouncementVoiceGender
 import com.example.lapbot.data.AnnouncementSettings
 import com.example.lapbot.data.ConnectionStatus
+import com.example.lapbot.data.CoachingChattiness
 import com.example.lapbot.data.LapTimelineEntry
 import com.example.lapbot.data.TimingRow
 import com.example.lapbot.data.TimingUiState
@@ -13,6 +14,37 @@ import junit.framework.TestCase.assertTrue
 import org.junit.Test
 
 class TimingStreamServiceTest {
+  @Test
+  fun coachingDetailVoiceCommandsMoveOneLevelAndClampAtTheEnds() {
+    assertEquals(
+      CoachingChattiness.Medium,
+      adjustCoachingDetail(CoachingChattiness.Low, CoachingDetailDirection.More),
+    )
+    assertEquals(
+      CoachingChattiness.High,
+      adjustCoachingDetail(CoachingChattiness.Medium, CoachingDetailDirection.More),
+    )
+    assertEquals(
+      CoachingChattiness.High,
+      adjustCoachingDetail(CoachingChattiness.High, CoachingDetailDirection.More),
+    )
+    assertEquals(
+      CoachingChattiness.Medium,
+      adjustCoachingDetail(CoachingChattiness.High, CoachingDetailDirection.Less),
+    )
+    assertEquals(
+      CoachingChattiness.Low,
+      adjustCoachingDetail(CoachingChattiness.Medium, CoachingDetailDirection.Less),
+    )
+    assertEquals(
+      CoachingChattiness.Low,
+      adjustCoachingDetail(CoachingChattiness.Low, CoachingDetailDirection.Less),
+    )
+    assertEquals("Coaching detail, low", formatCoachingDetailConfirmation(CoachingChattiness.Low))
+    assertEquals("Coaching detail, mid", formatCoachingDetailConfirmation(CoachingChattiness.Medium))
+    assertEquals("Coaching detail, high", formatCoachingDetailConfirmation(CoachingChattiness.High))
+  }
+
   @Test
   fun voiceGapCommandUsesCurrentTimingAndKartNumberPreference() {
     val rows =
