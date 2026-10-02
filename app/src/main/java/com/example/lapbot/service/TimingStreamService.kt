@@ -346,6 +346,7 @@ class TimingStreamService : Service() {
     val sections =
       when (command) {
         RaceVoiceCommand.Help -> listOf(VOICE_COMMAND_HELP_RESPONSE)
+        RaceVoiceCommand.Status -> formatRaceStatusVoiceCommandSections(TimingServiceState.mutableState.value)
         RaceVoiceCommand.Gaps -> formatGapVoiceCommandSections(TimingServiceState.mutableState.value)
         RaceVoiceCommand.SpeakMore -> changeCoachingDetail(CoachingDetailDirection.More)
         RaceVoiceCommand.SpeakLess -> changeCoachingDetail(CoachingDetailDirection.Less)
@@ -1086,6 +1087,23 @@ internal fun formatGapVoiceCommandSections(state: TimingUiState): List<String> {
       includeKartNumbers = state.announcementSettings.speakGapKartNumbers,
     )
   return sections.ifEmpty { listOf("Gaps are not available yet") }
+}
+
+internal fun formatRaceStatusVoiceCommandSections(state: TimingUiState): List<String> {
+  if (state.status != ConnectionStatus.Connected) return listOf("Live timing is not connected")
+  val selectedKartNumber = canonicalKartNumber(state.selectedKartNumber)
+    ?: return listOf("Pick a driver in focus first")
+  val selected =
+    state.rows.firstOrNull { canonicalKartNumber(it.number) == selectedKartNumber }
+      ?: return listOf("The driver in focus is not in the current session")
+  val position = selected.position ?: return listOf("Position is not available yet")
+  val sections = mutableListOf("Position P$position")
+  if (!state.supportsGaps) return sections + "Gap information is not available for this track"
+  val completedLap = selected.gapRecordedAtLap ?: selected.recentCompletedLap ?: selected.lap
+  val gaps = completedLap?.let { calculateAdjacentRaceGaps(state.rows, selected, it) }
+  sections += formatGapAnnouncementSections(gaps, includeKartNumbers = true)
+  if (sections.size == 1) sections += "Gaps are not available yet"
+  return sections
 }
 
 internal data class SectorDelta(val sector: Int, val sectorTimeMs: Long, val deltaMs: Long) {

@@ -15,8 +15,15 @@ class VoiceCommandParserTest {
 
   @Test
   fun `help response lists every available command`() {
-    listOf("gaps", "speak more", "speak less", "sectors on", "sectors off", "volume", "volume up", "volume down", "help", "commands")
+    listOf("status", "gaps", "speak more", "speak less", "sectors on", "sectors off", "volume", "volume up", "volume down", "help", "commands")
       .forEach { assertTrue(VOICE_COMMAND_HELP_RESPONSE.contains(it)) }
+  }
+
+  @Test
+  fun `recognises status after wake word`() {
+    assertEquals(RaceVoiceCommand.Status, parseRaceVoiceCommand("Lapbot, status"))
+    assertEquals(RaceVoiceCommand.Status, parseRaceVoiceCommand("lap bot race status please"))
+    assertNull(parseRaceVoiceCommand("status"))
   }
 
   @Test

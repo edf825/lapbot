@@ -2,6 +2,7 @@ package com.example.lapbot.service
 
 internal sealed interface RaceVoiceCommand {
   data object Help : RaceVoiceCommand
+  data object Status : RaceVoiceCommand
   data object Gaps : RaceVoiceCommand
   data object SpeakMore : RaceVoiceCommand
   data object SpeakLess : RaceVoiceCommand
@@ -29,6 +30,7 @@ internal fun parseRaceVoiceCommand(transcript: String): RaceVoiceCommand? {
     VOLUME_DOWN_COMMAND.matches(commandText) -> RaceVoiceCommand.VolumeDown
     volumeMatch != null -> RaceVoiceCommand.Volume(parseVolumeLevel(volumeMatch.groupValues[1]))
     HELP_COMMANDS.matches(commandText) -> RaceVoiceCommand.Help
+    STATUS_COMMANDS.matches(commandText) -> RaceVoiceCommand.Status
     GAP_COMMANDS.matches(commandText) -> RaceVoiceCommand.Gaps
     SPEAK_MORE_COMMANDS.matches(commandText) -> RaceVoiceCommand.SpeakMore
     SPEAK_LESS_COMMANDS.matches(commandText) -> RaceVoiceCommand.SpeakLess
@@ -39,7 +41,7 @@ internal fun parseRaceVoiceCommand(transcript: String): RaceVoiceCommand? {
 }
 
 internal const val VOICE_COMMAND_HELP_RESPONSE =
-  "Say Lapbot, then gaps, speak more, speak less, sectors on, sectors off, volume followed by a number from zero to ten, volume up, volume down, help, or commands."
+  "Say Lapbot, then status, gaps, speak more, speak less, sectors on, sectors off, volume followed by a number from zero to ten, volume up, volume down, help, or commands."
 
 private fun parseVolumeLevel(value: String): Int = value.toIntOrNull() ?: VOLUME_WORDS.indexOf(value)
 
@@ -54,6 +56,7 @@ private val VOLUME_COMMAND = Regex("^(?:set )?volume (10|[0-9]|${VOLUME_WORDS.jo
 private val VOLUME_UP_COMMAND = Regex("^(?:turn )?volume up(?: please)?$")
 private val VOLUME_DOWN_COMMAND = Regex("^(?:turn )?volume down(?: please)?$")
 private val HELP_COMMANDS = listOf("help", "commands")
+private val STATUS_COMMANDS = listOf("status", "race status")
 private val GAP_COMMANDS = listOf("gaps", "gap", "what are my gaps", "cars around me")
 private val SPEAK_MORE_COMMANDS = listOf("speak more", "more coaching")
 private val SPEAK_LESS_COMMANDS = listOf("speak less", "less coaching")

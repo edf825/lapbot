@@ -127,6 +127,7 @@ This document records the intended behavior of the Lapbot Android app. It is the
 - While command listening is enabled, accept `Lapbot, speak more` and `Lapbot, speak less`, move coaching detail one level with Low/High clamping, persist the result, and confirm the resulting level as Low, Mid, or High through the shared audio queue.
 - Accept `Lapbot, sectors on` and `Lapbot, sectors off`, persistently toggle spoken sector timing, and confirm the resulting state through the shared audio queue.
 - Accept `Lapbot, help` and `Lapbot, commands` and speak the available voice commands through the shared audio queue.
+- Accept `Lapbot, status` and speak the focused driver's current position and reliable gaps to the immediately preceding and following race positions, always including their kart numbers when known.
 - Accept `Lapbot, volume [0-10]`, set the device media volume to the corresponding level during a session, and confirm the resulting level through the shared audio queue. Accept spoken number words as well as digits.
 - Accept `Lapbot, volume up` and `Lapbot, volume down`, move one step on the 0–10 scale, clamp at zero and ten, and confirm the resulting level.
 - Treat a sector within 100 ms (one tenth) of the driver's fastest repeatable sector pace as personally consistent, not necessarily high performance. At High coaching detail, use varied, precise recognition and reinforce consecutive qualifying attempts.
