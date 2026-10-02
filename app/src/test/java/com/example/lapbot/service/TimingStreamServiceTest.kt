@@ -15,6 +15,18 @@ import org.junit.Test
 
 class TimingStreamServiceTest {
   @Test
+  fun mediaVolumeLevelsMapAcrossDeviceSteps() {
+    assertEquals(0, mediaVolumeStep(0, 15))
+    assertEquals(2, mediaVolumeStep(1, 15))
+    assertEquals(8, mediaVolumeStep(5, 15))
+    assertEquals(15, mediaVolumeStep(10, 15))
+    assertEquals(1, mediaVolumeStep(1, 1))
+    assertEquals(0, mediaVolumeLevel(0, 15))
+    assertEquals(5, mediaVolumeLevel(8, 15))
+    assertEquals(10, mediaVolumeLevel(15, 15))
+  }
+
+  @Test
   fun coachingDetailVoiceCommandsMoveOneLevelAndClampAtTheEnds() {
     assertEquals(
       CoachingChattiness.Medium,

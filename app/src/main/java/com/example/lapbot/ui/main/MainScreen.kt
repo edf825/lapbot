@@ -411,7 +411,7 @@ internal fun RaceEngineerScreen(
       Column(Modifier.weight(1f)) {
         Text("Listen for commands", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
         Text(
-          if (state.listenForCommands) "Say “Lapbot, gaps” for an on-demand update" else "Voice commands are off",
+          if (state.listenForCommands) "Say “Lapbot, help” to hear available commands" else "Voice commands are off",
           color = MaterialTheme.colorScheme.onSurfaceVariant,
           style = MaterialTheme.typography.bodySmall,
         )

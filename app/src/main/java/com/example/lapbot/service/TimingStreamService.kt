@@ -9,6 +9,7 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.media.AudioAttributes
 import android.media.AudioManager
 import android.media.ToneGenerator
 import android.os.Build
@@ -107,6 +108,12 @@ class TimingStreamService : Service() {
       TextToSpeech(this) { status ->
         if (status == TextToSpeech.SUCCESS) {
           textToSpeech?.language = Locale.UK
+          textToSpeech?.setAudioAttributes(
+            AudioAttributes.Builder()
+              .setUsage(AudioAttributes.USAGE_MEDIA)
+              .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+              .build(),
+          )
           textToSpeechReady = true
           drainAnnouncementQueue()
         } else {
@@ -334,17 +341,46 @@ class TimingStreamService : Service() {
   }
 
   private fun handleVoiceCommand(command: RaceVoiceCommand) {
-    Log.i(TAG, "Voice command recognised: ${command.name}")
+    Log.i(TAG, "Voice command recognised: $command")
     commandAcknowledgement?.startTone(ToneGenerator.TONE_PROP_ACK, COMMAND_ACK_DURATION_MS)
     val sections =
       when (command) {
+        RaceVoiceCommand.Help -> listOf(VOICE_COMMAND_HELP_RESPONSE)
         RaceVoiceCommand.Gaps -> formatGapVoiceCommandSections(TimingServiceState.mutableState.value)
         RaceVoiceCommand.SpeakMore -> changeCoachingDetail(CoachingDetailDirection.More)
         RaceVoiceCommand.SpeakLess -> changeCoachingDetail(CoachingDetailDirection.Less)
         RaceVoiceCommand.SectorsOn -> setSectorTimingAnnouncements(enabled = true)
         RaceVoiceCommand.SectorsOff -> setSectorTimingAnnouncements(enabled = false)
+        RaceVoiceCommand.VolumeUp -> adjustMediaVolume(1)
+        RaceVoiceCommand.VolumeDown -> adjustMediaVolume(-1)
+        is RaceVoiceCommand.Volume -> setMediaVolume(command.level)
       }
     announce(sections, preSpeechDelayMs = COMMAND_ACK_SPEECH_DELAY_MS)
+  }
+
+  private fun setMediaVolume(level: Int): List<String> {
+    val audioManager = getSystemService(AudioManager::class.java)
+    if (audioManager == null || audioManager.isVolumeFixed) return listOf("Volume cannot be changed on this device")
+    val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+    if (maxVolume <= 0) return listOf("Volume cannot be changed on this device")
+    val streamLevel = mediaVolumeStep(level, maxVolume)
+    return try {
+      audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, streamLevel, 0)
+      val actualLevel = mediaVolumeLevel(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC), maxVolume)
+      listOf("Volume $actualLevel")
+    } catch (error: SecurityException) {
+      Log.w(TAG, "Unable to change media volume", error)
+      listOf("Volume cannot be changed on this device")
+    }
+  }
+
+  private fun adjustMediaVolume(direction: Int): List<String> {
+    val audioManager = getSystemService(AudioManager::class.java)
+    if (audioManager == null || audioManager.isVolumeFixed) return listOf("Volume cannot be changed on this device")
+    val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+    if (maxVolume <= 0) return listOf("Volume cannot be changed on this device")
+    val currentLevel = mediaVolumeLevel(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC), maxVolume)
+    return setMediaVolume((currentLevel + direction).coerceIn(0, 10))
   }
 
   private fun setSectorTimingAnnouncements(enabled: Boolean): List<String> {
@@ -1023,6 +1059,16 @@ internal fun adjustCoachingDetail(
 
 internal fun formatCoachingDetailConfirmation(detail: CoachingChattiness): String =
   "Coaching detail, ${if (detail == CoachingChattiness.Medium) "mid" else detail.name.lowercase()}"
+
+internal fun mediaVolumeStep(level: Int, maxVolume: Int): Int {
+  require(level in 0..10 && maxVolume > 0)
+  return if (level == 0) 0 else ((level * maxVolume + 5) / 10).coerceAtLeast(1)
+}
+
+internal fun mediaVolumeLevel(streamLevel: Int, maxVolume: Int): Int {
+  require(maxVolume > 0)
+  return ((streamLevel * 10 + maxVolume / 2) / maxVolume).coerceIn(0, 10)
+}
 
 internal fun formatGapVoiceCommandSections(state: TimingUiState): List<String> {
   if (state.status != ConnectionStatus.Connected) return listOf("Live timing is not connected")
