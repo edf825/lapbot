@@ -12,3 +12,7 @@ import kotlinx.serialization.Serializable
 @Serializable data object EngineerSettings : NavKey
 
 @Serializable data object PitlaneMode : NavKey
+
+@Serializable data object Sessions : NavKey
+
+@Serializable data class SessionDebrief(val sessionId: String) : NavKey

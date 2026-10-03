@@ -3,6 +3,7 @@ package com.example.lapbot.service
 import com.example.lapbot.data.AnnouncementVoiceGender
 import com.example.lapbot.data.AnnouncementSettings
 import com.example.lapbot.data.ConnectionStatus
+import com.example.lapbot.data.CoachingChattiness
 import com.example.lapbot.data.LapTimelineEntry
 import com.example.lapbot.data.TimingRow
 import com.example.lapbot.data.TimingUiState
@@ -13,6 +14,49 @@ import junit.framework.TestCase.assertTrue
 import org.junit.Test
 
 class TimingStreamServiceTest {
+  @Test
+  fun mediaVolumeLevelsMapAcrossDeviceSteps() {
+    assertEquals(0, mediaVolumeStep(0, 15))
+    assertEquals(2, mediaVolumeStep(1, 15))
+    assertEquals(8, mediaVolumeStep(5, 15))
+    assertEquals(15, mediaVolumeStep(10, 15))
+    assertEquals(1, mediaVolumeStep(1, 1))
+    assertEquals(0, mediaVolumeLevel(0, 15))
+    assertEquals(5, mediaVolumeLevel(8, 15))
+    assertEquals(10, mediaVolumeLevel(15, 15))
+  }
+
+  @Test
+  fun coachingDetailVoiceCommandsMoveOneLevelAndClampAtTheEnds() {
+    assertEquals(
+      CoachingChattiness.Medium,
+      adjustCoachingDetail(CoachingChattiness.Low, CoachingDetailDirection.More),
+    )
+    assertEquals(
+      CoachingChattiness.High,
+      adjustCoachingDetail(CoachingChattiness.Medium, CoachingDetailDirection.More),
+    )
+    assertEquals(
+      CoachingChattiness.High,
+      adjustCoachingDetail(CoachingChattiness.High, CoachingDetailDirection.More),
+    )
+    assertEquals(
+      CoachingChattiness.Medium,
+      adjustCoachingDetail(CoachingChattiness.High, CoachingDetailDirection.Less),
+    )
+    assertEquals(
+      CoachingChattiness.Low,
+      adjustCoachingDetail(CoachingChattiness.Medium, CoachingDetailDirection.Less),
+    )
+    assertEquals(
+      CoachingChattiness.Low,
+      adjustCoachingDetail(CoachingChattiness.Low, CoachingDetailDirection.Less),
+    )
+    assertEquals("Coaching detail, low", formatCoachingDetailConfirmation(CoachingChattiness.Low))
+    assertEquals("Coaching detail, mid", formatCoachingDetailConfirmation(CoachingChattiness.Medium))
+    assertEquals("Coaching detail, high", formatCoachingDetailConfirmation(CoachingChattiness.High))
+  }
+
   @Test
   fun voiceGapCommandUsesCurrentTimingAndKartNumberPreference() {
     val rows =
@@ -65,6 +109,78 @@ class TimingStreamServiceTest {
     assertEquals(
       listOf("Pick a driver in focus first"),
       formatGapVoiceCommandSections(TimingUiState(status = ConnectionStatus.Connected)),
+    )
+  }
+
+  @Test
+  fun statusSpeaksPositionAndBothAdjacentGapsWithKartNumbers() {
+    val state =
+      TimingUiState(
+        status = ConnectionStatus.Connected,
+        selectedKartNumber = "8",
+        rows =
+          listOf(
+            voiceGapRow("12", position = 3, gapToLeaderMs = 2_000),
+            voiceGapRow("8", position = 4, gapToLeaderMs = 3_200),
+            voiceGapRow("27", position = 5, gapToLeaderMs = 3_530),
+          ),
+        announcementSettings = AnnouncementSettings(speakGaps = false, speakGapKartNumbers = false),
+      )
+
+    assertEquals(
+      listOf("Position P4", "Gap to P3, kart 12, 1 point 20", "Gap to P5, kart 27, point 33"),
+      formatRaceStatusVoiceCommandSections(state),
+    )
+  }
+
+  @Test
+  fun statusSpeaksAvailableSideAtTheFrontOfTheField() {
+    val state =
+      TimingUiState(
+        status = ConnectionStatus.Connected,
+        selectedKartNumber = "8",
+        rows =
+          listOf(
+            voiceGapRow("8", position = 1, gapToLeaderMs = 0),
+            voiceGapRow("27", position = 2, gapToLeaderMs = 330),
+          ),
+      )
+
+    assertEquals(
+      listOf("Position P1", "Gap to P2, kart 27, point 33"),
+      formatRaceStatusVoiceCommandSections(state),
+    )
+  }
+
+  @Test
+  fun statusKeepsPositionWhenGapsAreUnavailable() {
+    val selected = TimingRow(id = "8", number = "8", position = 4, lap = 6)
+    val state =
+      TimingUiState(
+        status = ConnectionStatus.Connected,
+        selectedKartNumber = "8",
+        rows = listOf(TimingRow(id = "12", number = "12", position = 3, lap = 6), selected),
+      )
+
+    assertEquals(
+      listOf("Position P4", "Gaps are not available yet"),
+      formatRaceStatusVoiceCommandSections(state),
+    )
+    assertEquals(
+      listOf("Position P4", "Gap information is not available for this track"),
+      formatRaceStatusVoiceCommandSections(state.copy(supportsGaps = false)),
+    )
+  }
+
+  @Test
+  fun statusExplainsMissingConnectionOrFocus() {
+    assertEquals(
+      listOf("Live timing is not connected"),
+      formatRaceStatusVoiceCommandSections(TimingUiState()),
+    )
+    assertEquals(
+      listOf("Pick a driver in focus first"),
+      formatRaceStatusVoiceCommandSections(TimingUiState(status = ConnectionStatus.Connected)),
     )
   }
 

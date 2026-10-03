@@ -94,6 +94,7 @@ class MainScreenTest {
     composeTestRule.onNodeWithText("Current timing").assertExists()
     composeTestRule.onAllNodesWithText("JSON stream tail").assertCountEquals(0)
     composeTestRule.onAllNodesWithText("Replay session 837888").assertCountEquals(0)
+    composeTestRule.onNodeWithText("Sessions").assertExists()
   }
 
   @Test

@@ -9,6 +9,7 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.media.AudioAttributes
 import android.media.AudioManager
 import android.media.ToneGenerator
 import android.os.Build
@@ -24,10 +25,16 @@ import com.example.lapbot.data.AlphaRaceHubRepository
 import com.example.lapbot.data.ClubspeedTimingRepository
 import com.example.lapbot.data.AnnouncementVoiceGender
 import com.example.lapbot.data.ConnectionStatus
+import com.example.lapbot.data.CoachingChattiness
 import com.example.lapbot.data.CoachingObjectiveUiState
 import com.example.lapbot.data.DemoTimingReplay
 import com.example.lapbot.data.ReconnectPolicy
+import com.example.lapbot.data.SessionHistoryStore
+import com.example.lapbot.data.SessionRecorder
 import com.example.lapbot.data.RelativeOpportunityUiState
+import com.example.lapbot.data.PREF_COACHING_CHATTINESS
+import com.example.lapbot.data.PREF_SPEAK_SECTOR_DELTAS
+import com.example.lapbot.data.TIMING_PREFERENCES_NAME
 import com.example.lapbot.data.TimingServiceState
 import com.example.lapbot.data.TimingRepository
 import com.example.lapbot.data.TimingTracks
@@ -37,16 +44,16 @@ import com.example.lapbot.data.ToneMetric
 import com.example.lapbot.data.ToneSettings
 import com.example.lapbot.data.canonicalKartNumber
 import com.example.lapbot.data.findDriverByNameFragment
+import com.example.lapbot.data.toTimingRow
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import java.util.Locale
-import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
 
 class TimingStreamService : Service() {
@@ -60,10 +67,15 @@ class TimingStreamService : Service() {
   private lateinit var voiceCommandListener: VoiceCommandListener
   private var voiceCommandListening = false
   private var commandAcknowledgement: ToneGenerator? = null
-  private var pendingAnnouncement: PendingAnnouncement? = null
+  private val announcementQueue = PlaybackMessageQueue<PendingAnnouncement>()
+  private val activeAnnouncement: PendingAnnouncement?
+    get() = announcementQueue.active
+  private var activeUtteranceId: String? = null
+  private var announcementDelayJob: Job? = null
+  private var tonesPlaying = false
+  private var stopWhenAudioQueueDrains = false
   private lateinit var tonePlayer: TonePlayer
   private lateinit var sectorSoundPlayer: SectorSoundPlayer
-  private val utteranceCompletions = ConcurrentHashMap<String, UtteranceCompletion>()
   private var pendingToneLap: Int? = null
   private var pendingToneSpeechComplete = false
   private var gapAnnouncementJob: Job? = null
@@ -77,6 +89,8 @@ class TimingStreamService : Service() {
   private var coachingSessionKey: String? = null
   private var demoActive = false
   private var demoJob: Job? = null
+  private lateinit var sessionStore: SessionHistoryStore
+  private lateinit var sessionRecorder: SessionRecorder
 
   override fun onCreate() {
     super.onCreate()
@@ -84,6 +98,8 @@ class TimingStreamService : Service() {
     TimingServiceState.running = true
     tonePlayer = TonePlayer(scope)
     sectorSoundPlayer = SectorSoundPlayer(this)
+    sessionStore = SessionHistoryStore(this)
+    sessionRecorder = SessionRecorder(sessionStore)
     commandAcknowledgement = ToneGenerator(AudioManager.STREAM_MUSIC, 80)
     voiceCommandListener = VoiceCommandListener(this, ::handleVoiceCommand)
     notificationManager = getSystemService(NotificationManager::class.java)
@@ -92,9 +108,18 @@ class TimingStreamService : Service() {
       TextToSpeech(this) { status ->
         if (status == TextToSpeech.SUCCESS) {
           textToSpeech?.language = Locale.UK
+          textToSpeech?.setAudioAttributes(
+            AudioAttributes.Builder()
+              .setUsage(AudioAttributes.USAGE_MEDIA)
+              .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+              .build(),
+          )
           textToSpeechReady = true
-          pendingAnnouncement?.let(::speak)
-          pendingAnnouncement = null
+          drainAnnouncementQueue()
+        } else {
+          Log.e(TAG, "Text-to-speech initialization failed: $status")
+          announcementQueue.clear()
+          voiceCommandListener.resumeAfterPlayback()
         }
       }
     textToSpeech?.setOnUtteranceProgressListener(
@@ -104,33 +129,15 @@ class TimingStreamService : Service() {
         }
 
         override fun onDone(utteranceId: String) {
-          val completion = utteranceCompletions.remove(utteranceId) ?: return
-          scope.launch {
-            if (completion.lap != null && pendingToneLap == completion.lap) {
-              pendingToneSpeechComplete = true
-              playPendingTones(TimingServiceState.mutableState.value)
-            }
-            if (completion.stopServiceAfter && !foreground) stopSelf()
-            voiceCommandListener.resumeAfterPlayback()
-          }
+          scope.launch { completeAnnouncement(utteranceId, succeeded = true) }
         }
 
         override fun onError(utteranceId: String) {
-          val completion = utteranceCompletions.remove(utteranceId)
-          scope.launch {
-            clearPendingTone(completion?.lap)
-            if (completion?.stopServiceAfter == true && !foreground) stopSelf()
-            voiceCommandListener.resumeAfterPlayback()
-          }
+          scope.launch { completeAnnouncement(utteranceId, succeeded = false) }
         }
 
         override fun onStop(utteranceId: String, interrupted: Boolean) {
-          val completion = utteranceCompletions.remove(utteranceId)
-          scope.launch {
-            clearPendingTone(completion?.lap)
-            if (completion?.stopServiceAfter == true && !foreground) stopSelf()
-            voiceCommandListener.resumeAfterPlayback()
-          }
+          scope.launch { completeAnnouncement(utteranceId, succeeded = false) }
         }
       },
     )
@@ -147,8 +154,8 @@ class TimingStreamService : Service() {
     nextRepository.setTailLimit(current.tailLimit)
     nextRepository.setReconnectPolicy(current.reconnectPolicy)
     repositoryStateJob = scope.launch {
-      nextRepository.state.collectLatest { repositoryState ->
-        if (demoActive) return@collectLatest
+      nextRepository.state.collect { repositoryState ->
+        if (demoActive) return@collect
         val settings = TimingServiceState.mutableState.value
         val autoDetectedKartNumber =
           settings.autoDetectDriverName?.let { fragment ->
@@ -179,9 +186,12 @@ class TimingStreamService : Service() {
           observedSectorUpdates.clear()
           coachingSessionKey = state.sessionKey
         }
+        // Establish the durable recording before lap processing can emit its first announcement.
+        sessionRecorder.observe(state)
         observeCompletedLaps(state)
-        TimingServiceState.mutableState.value =
-          state.copy(coachingObjective = coachingObjectiveUi, relativeOpportunity = relativeOpportunityUi)
+        val finalState = state.copy(coachingObjective = coachingObjectiveUi, relativeOpportunity = relativeOpportunityUi)
+        TimingServiceState.mutableState.value = finalState
+        sessionRecorder.observe(finalState)
         playPendingTones(state)
         if (foreground) notificationManager.notify(NOTIFICATION_ID, streamNotification(state))
       }
@@ -193,6 +203,7 @@ class TimingStreamService : Service() {
     Log.i(TAG, "Service command: ${intent?.action ?: "restart"}")
     when (intent?.action) {
       ACTION_CONNECT -> {
+        clearAudioQueue()
         demoActive = false
         demoJob?.cancel()
         observedCompletedLaps.clear()
@@ -210,13 +221,16 @@ class TimingStreamService : Service() {
         val nextRepository =
           when (track.id) {
             TimingTracks.DaytonaSandownParkGp.id -> ClubspeedTimingRepository()
-            TimingTracks.TeamSportFarnborough.id -> TeamSportTimingRepository()
+            TimingTracks.TeamSportFarnborough.id,
+            TimingTracks.TeamSportLeicester.id -> TeamSportTimingRepository.forTrack(track)
             else -> AlphaRaceHubRepository()
           }
         configureRepository(nextRepository, connect = true, trackId = track.id)
         syncVoiceCommandListening()
       }
       ACTION_START_DEMO -> startDemo()
+      ACTION_REPLAY_RECORDED_SESSION ->
+        intent.getStringExtra(EXTRA_RECORDED_SESSION_ID)?.let(::startRecordedReplay)
       ACTION_DISCONNECT -> stopStreaming()
       ACTION_SET_AUTO_RECONNECT ->
         repository?.setAutoReconnect(intent.getBooleanExtra(EXTRA_AUTO_RECONNECT, false))
@@ -295,7 +309,11 @@ class TimingStreamService : Service() {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
       val types =
         ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or
-          if (voiceCommandListening) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0
+          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && voiceCommandListening) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+          } else {
+            0
+          }
       startForeground(NOTIFICATION_ID, notification, types)
     } else {
       startForeground(NOTIFICATION_ID, notification)
@@ -323,16 +341,74 @@ class TimingStreamService : Service() {
   }
 
   private fun handleVoiceCommand(command: RaceVoiceCommand) {
-    Log.i(TAG, "Voice command recognised: ${command.name}")
+    Log.i(TAG, "Voice command recognised: $command")
     commandAcknowledgement?.startTone(ToneGenerator.TONE_PROP_ACK, COMMAND_ACK_DURATION_MS)
-    scope.launch {
-      delay(COMMAND_ACK_SPEECH_DELAY_MS)
-      val sections =
-        when (command) {
-          RaceVoiceCommand.Gaps -> formatGapVoiceCommandSections(TimingServiceState.mutableState.value)
-        }
-      announce(sections)
+    val sections =
+      when (command) {
+        RaceVoiceCommand.Help -> listOf(VOICE_COMMAND_HELP_RESPONSE)
+        RaceVoiceCommand.Status -> formatRaceStatusVoiceCommandSections(TimingServiceState.mutableState.value)
+        RaceVoiceCommand.Gaps -> formatGapVoiceCommandSections(TimingServiceState.mutableState.value)
+        RaceVoiceCommand.SpeakMore -> changeCoachingDetail(CoachingDetailDirection.More)
+        RaceVoiceCommand.SpeakLess -> changeCoachingDetail(CoachingDetailDirection.Less)
+        RaceVoiceCommand.SectorsOn -> setSectorTimingAnnouncements(enabled = true)
+        RaceVoiceCommand.SectorsOff -> setSectorTimingAnnouncements(enabled = false)
+        RaceVoiceCommand.VolumeUp -> adjustMediaVolume(1)
+        RaceVoiceCommand.VolumeDown -> adjustMediaVolume(-1)
+        is RaceVoiceCommand.Volume -> setMediaVolume(command.level)
+      }
+    announce(sections, preSpeechDelayMs = COMMAND_ACK_SPEECH_DELAY_MS)
+  }
+
+  private fun setMediaVolume(level: Int): List<String> {
+    val audioManager = getSystemService(AudioManager::class.java)
+    if (audioManager == null || audioManager.isVolumeFixed) return listOf("Volume cannot be changed on this device")
+    val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+    if (maxVolume <= 0) return listOf("Volume cannot be changed on this device")
+    val streamLevel = mediaVolumeStep(level, maxVolume)
+    return try {
+      audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, streamLevel, 0)
+      val actualLevel = mediaVolumeLevel(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC), maxVolume)
+      listOf("Volume $actualLevel")
+    } catch (error: SecurityException) {
+      Log.w(TAG, "Unable to change media volume", error)
+      listOf("Volume cannot be changed on this device")
     }
+  }
+
+  private fun adjustMediaVolume(direction: Int): List<String> {
+    val audioManager = getSystemService(AudioManager::class.java)
+    if (audioManager == null || audioManager.isVolumeFixed) return listOf("Volume cannot be changed on this device")
+    val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+    if (maxVolume <= 0) return listOf("Volume cannot be changed on this device")
+    val currentLevel = mediaVolumeLevel(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC), maxVolume)
+    return setMediaVolume((currentLevel + direction).coerceIn(0, 10))
+  }
+
+  private fun setSectorTimingAnnouncements(enabled: Boolean): List<String> {
+    val state = TimingServiceState.mutableState.value
+    TimingServiceState.mutableState.value =
+      state.copy(
+        announcementSettings = state.announcementSettings.copy(speakSectorDeltas = enabled),
+      )
+    getSharedPreferences(TIMING_PREFERENCES_NAME, MODE_PRIVATE)
+      .edit()
+      .putBoolean(PREF_SPEAK_SECTOR_DELTAS, enabled)
+      .apply()
+    return listOf("Sector times ${if (enabled) "on" else "off"}")
+  }
+
+  private fun changeCoachingDetail(direction: CoachingDetailDirection): List<String> {
+    val state = TimingServiceState.mutableState.value
+    val next = adjustCoachingDetail(state.announcementSettings.coachingChattiness, direction)
+    TimingServiceState.mutableState.value =
+      state.copy(
+        announcementSettings = state.announcementSettings.copy(coachingChattiness = next),
+      )
+    getSharedPreferences(TIMING_PREFERENCES_NAME, MODE_PRIVATE)
+      .edit()
+      .putString(PREF_COACHING_CHATTINESS, next.name)
+      .apply()
+    return listOf(formatCoachingDetailConfirmation(next))
   }
 
   private fun observeCompletedLaps(state: com.example.lapbot.data.TimingUiState) {
@@ -386,6 +462,13 @@ class TimingStreamService : Service() {
           objectiveUi = sessionCoach.objectiveUi(driver.id),
           relativeOpportunityUi = sessionCoach.relativeOpportunityUi(),
         )
+      if (isNewSelectedLap) {
+        listOfNotNull(finalSectorCoaching, lapCoaching.lapObservation)
+          .distinctBy(CoachingObservation::text)
+          .forEach { observation ->
+            scope.launch { sessionRecorder.recordObservation(observation.text, completedLap, observation.sector) }
+          }
+      }
       if (isSelected) {
         coachingObjectiveUi = lapCoaching.objectiveUi
         relativeOpportunityUi = lapCoaching.relativeOpportunityUi
@@ -448,34 +531,74 @@ class TimingStreamService : Service() {
     lap: Int? = null,
     stopServiceAfter: Boolean = false,
     sectorSound: SectorSound? = null,
-    queueMode: Int = TextToSpeech.QUEUE_FLUSH,
+    preSpeechDelayMs: Long = 0,
   ) {
-    if (sectorSound != null) {
-      sectorSoundPlayer.play(sectorSound)
-      scope.launch {
-        delay(SECTOR_SPEECH_DELAY_MS)
-        announce(sections, lap, stopServiceAfter, queueMode = queueMode)
+    if (sections.isEmpty()) return
+    scope.launch { sessionRecorder.recordAnnouncement(sections, lap) }
+    announcementQueue.enqueue(
+      PendingAnnouncement(sections, lap, stopServiceAfter, sectorSound, preSpeechDelayMs),
+    )
+    voiceCommandListener.pauseForPlayback()
+    drainAnnouncementQueue()
+  }
+
+  private fun drainAnnouncementQueue() {
+    if (!textToSpeechReady || activeAnnouncement != null || announcementDelayJob != null || tonesPlaying) return
+    if (pendingToneSpeechComplete && playPendingTones(TimingServiceState.mutableState.value)) return
+    val next = announcementQueue.startNext()
+    if (next == null) {
+      voiceCommandListener.resumeAfterPlayback()
+      if (stopWhenAudioQueueDrains && !foreground) {
+        stopWhenAudioQueueDrains = false
+        stopSelf()
       }
       return
     }
-    val announcement = PendingAnnouncement(sections, lap, stopServiceAfter, queueMode)
-    if (textToSpeechReady) speak(announcement) else pendingAnnouncement = announcement
+    if (next.stopServiceAfter) stopWhenAudioQueueDrains = true
+    voiceCommandListener.pauseForPlayback()
+    next.sectorSound?.let(sectorSoundPlayer::play)
+    val delayBeforeSpeech =
+      maxOf(next.preSpeechDelayMs, if (next.sectorSound != null) SECTOR_SPEECH_DELAY_MS else 0)
+    if (delayBeforeSpeech > 0) {
+      announcementDelayJob =
+        scope.launch {
+          delay(delayBeforeSpeech)
+          announcementDelayJob = null
+          speakActiveAnnouncement()
+        }
+    } else {
+      speakActiveAnnouncement()
+    }
   }
 
-  private fun speak(announcement: PendingAnnouncement) {
+  private fun speakActiveAnnouncement() {
+    val announcement = activeAnnouncement ?: return
     val tts = textToSpeech ?: return
     configureVoice(tts, TimingServiceState.mutableState.value.announcementSettings.voiceGender)
     tts.setSpeechRate(TimingServiceState.mutableState.value.announcementSettings.speechRate)
     tts.setPitch(NATURAL_SPEECH_PITCH)
     val utteranceId = "announcement-${System.nanoTime()}"
-    utteranceCompletions[utteranceId] =
-      UtteranceCompletion(announcement.lap, announcement.stopServiceAfter)
-    tts.speak(
+    activeUtteranceId = utteranceId
+    val result = tts.speak(
       announcement.sections.joinToString(separator = ". ", postfix = "."),
-      announcement.queueMode,
+      TextToSpeech.QUEUE_ADD,
       null,
       utteranceId,
     )
+    if (result == TextToSpeech.ERROR) completeAnnouncement(utteranceId, succeeded = false)
+  }
+
+  private fun completeAnnouncement(utteranceId: String, succeeded: Boolean) {
+    if (activeUtteranceId != utteranceId) return
+    val completed = activeAnnouncement
+    activeUtteranceId = null
+    announcementQueue.completeActive()
+    if (succeeded && completed?.lap != null && pendingToneLap == completed.lap) {
+      pendingToneSpeechComplete = true
+    } else if (!succeeded) {
+      clearPendingTone(completed?.lap)
+    }
+    drainAnnouncementQueue()
   }
 
   private fun scheduleGapAnnouncement(driverId: String, completedLap: Int, sessionKey: String?) {
@@ -503,7 +626,7 @@ class TimingStreamService : Service() {
             calculateAdjacentRaceGaps(state.rows, selected, completedLap),
             includeKartNumbers = state.announcementSettings.speakGapKartNumbers,
           )
-        if (sections.isNotEmpty()) announce(sections = sections, queueMode = TextToSpeech.QUEUE_ADD)
+        if (sections.isNotEmpty()) announce(sections = sections)
         gapAnnouncementJob = null
       }
   }
@@ -522,6 +645,9 @@ class TimingStreamService : Service() {
       val isNewUpdate = observedSectorUpdates.add(SectorUpdateKey(driver.id, lap, sector))
       if (isNewUpdate && !seedOnly && driver.lapMs == null) {
         val coaching = sessionCoach.onSector(driver, lap, sector, timeMs, state.announcementSettings.coachingChattiness)
+        coaching.sectorObservation?.let { observation ->
+          scope.launch { sessionRecorder.recordObservation(observation.text, lap, observation.sector) }
+        }
         coachingObjectiveUi = coaching.objectiveUi
         val speakRaw = state.announcementSettings.speakSectorDeltas
         val speakCoaching = state.announcementSettings.speakCoaching && coaching.sectorObservation != null
@@ -571,18 +697,31 @@ class TimingStreamService : Service() {
     )
   }
 
-  private fun playPendingTones(state: com.example.lapbot.data.TimingUiState) {
-    val lap = pendingToneLap ?: return
-    if (!pendingToneSpeechComplete) return
+  private fun playPendingTones(state: com.example.lapbot.data.TimingUiState): Boolean {
+    if (activeAnnouncement != null || announcementDelayJob != null || tonesPlaying) return false
+    val lap = pendingToneLap ?: return false
+    if (!pendingToneSpeechComplete) return false
     if (!state.toneSettings.enabled) {
       pendingToneLap = null
       pendingToneSpeechComplete = false
-      return
+      return false
     }
-    val sequence = buildToneSequence(state, lap) ?: return
+    val sequence =
+      buildToneSequence(state, lap)
+        ?: run {
+          pendingToneLap = null
+          pendingToneSpeechComplete = false
+          return false
+        }
     pendingToneLap = null
     pendingToneSpeechComplete = false
-    tonePlayer.play(sequence)
+    tonesPlaying = true
+    voiceCommandListener.pauseForPlayback()
+    tonePlayer.play(sequence) {
+      tonesPlaying = false
+      drainAnnouncementQueue()
+    }
+    return true
   }
 
   private fun clearPendingTone(lap: Int?) {
@@ -596,13 +735,21 @@ class TimingStreamService : Service() {
     val sequence = buildToneSequence(state)
     if (sequence == null) {
       Log.w(TAG, "Test tones unavailable for selected metric")
+    } else if (activeAnnouncement != null || announcementDelayJob != null || tonesPlaying || !announcementQueue.isEmpty) {
+      Log.i(TAG, "Test tones skipped while the audio queue is active")
     } else {
-      tonePlayer.play(sequence)
+      tonesPlaying = true
+      voiceCommandListener.pauseForPlayback()
+      tonePlayer.play(sequence) {
+        tonesPlaying = false
+        drainAnnouncementQueue()
+      }
     }
   }
 
   private fun startDemo() {
     Log.i(TAG, "Starting demo replay for session 837888")
+    clearAudioQueue()
     demoActive = true
     demoJob?.cancel()
     gapAnnouncementJob?.cancel()
@@ -625,6 +772,7 @@ class TimingStreamService : Service() {
       settings.copy(
         status = ConnectionStatus.Connected,
         isDemo = true,
+        replayDescription = "Session 837888 · kart #5 John Reeves · replayed at 2× speed",
         selectedTrackId = TimingTracks.BuckmorePark.id,
         sessionKey = coachingSessionKey,
         supportsSectors = true,
@@ -668,7 +816,100 @@ class TimingStreamService : Service() {
       }
   }
 
+  private fun startRecordedReplay(sessionId: String) {
+    clearAudioQueue()
+    demoActive = true
+    demoJob?.cancel()
+    gapAnnouncementJob?.cancel()
+    repository?.disconnect()
+    startInForeground()
+    demoJob =
+      scope.launch {
+        sessionRecorder.finish()
+        val recorded = sessionStore.load(sessionId)
+        if (recorded == null) {
+          TimingServiceState.mutableState.value =
+            TimingServiceState.mutableState.value.copy(
+              status = ConnectionStatus.Disconnected,
+              isDemo = false,
+              replayDescription = null,
+              error = "Recorded session is unavailable.",
+            )
+          return@launch
+        }
+        observedCompletedLaps.clear()
+        knownDriverIds.clear()
+        observedSectorUpdates.clear()
+        observedSectorKartNumber = null
+        sessionCoach.reset()
+        coachingObjectiveUi = CoachingObjectiveUiState()
+        relativeOpportunityUi = RelativeOpportunityUiState()
+        coachingSessionKey = "recorded:${recorded.id}"
+        pendingToneLap = null
+        pendingToneSpeechComplete = false
+        val track = TimingTracks.find(recorded.trackId)
+        val focusedDriver =
+          com.example.lapbot.data.RecordedDriver(
+            id = recorded.selectedDriverId,
+            name = recorded.selectedDriverName,
+            kartNumber = recorded.kartNumbers.lastOrNull().orEmpty(),
+            finalPosition = recorded.laps.lastOrNull()?.position,
+            laps = recorded.laps,
+          )
+        val replayField = recorded.field.filterNot { it.id == recorded.selectedDriverId } + focusedDriver
+        val replayLaps = recorded.laps.map { it.lap }.sorted()
+        replayLaps.forEachIndexed { index, lap ->
+          if (!demoActive) return@launch
+          val recordedLap = recorded.laps.first { it.lap == lap }
+          val initialRows = replayField.map { it.toTimingRow(lap) }
+          val focusedPosition = recordedLap.position
+          val rows =
+            initialRows.map { row ->
+              if (
+                focusedPosition != null && row.position == focusedPosition + 1 &&
+                  recordedLap.gapBehindMs != null
+              ) {
+                row.copy(gapToAheadMs = recordedLap.gapBehindMs, gapRecordedAtLap = lap)
+              } else row
+            }
+          val state =
+            TimingServiceState.mutableState.value.copy(
+              status = ConnectionStatus.Connected,
+              isDemo = true,
+              replayDescription = "${recorded.venue} · ${recorded.selectedDriverName} · recorded replay",
+              selectedTrackId = recorded.trackId,
+              sessionKey = coachingSessionKey,
+              supportsSectors = track?.supportsSectors ?: recorded.laps.any { it.sector1Ms != null },
+              supportsGaps = track?.supportsGaps ?: true,
+              rows = rows,
+              selectedKartNumber = focusedDriver.kartNumber,
+              error = null,
+            )
+          observeCompletedLaps(state)
+          TimingServiceState.mutableState.value =
+            state.copy(coachingObjective = coachingObjectiveUi, relativeOpportunity = relativeOpportunityUi)
+          if (foreground) notificationManager.notify(NOTIFICATION_ID, streamNotification(state))
+          if (index < replayLaps.lastIndex) delay(RECORDED_REPLAY_LAP_DELAY_MS)
+        }
+      }
+  }
+
+  private fun clearAudioQueue() {
+    announcementQueue.clear()
+    announcementDelayJob?.cancel()
+    announcementDelayJob = null
+    activeUtteranceId = null
+    stopWhenAudioQueueDrains = false
+    pendingToneLap = null
+    pendingToneSpeechComplete = false
+    tonesPlaying = false
+    textToSpeech?.stop()
+    tonePlayer.stop()
+    sectorSoundPlayer.release()
+  }
+
   private fun stopStreaming() {
+    clearAudioQueue()
     demoActive = false
     demoJob?.cancel()
     gapAnnouncementJob?.cancel()
@@ -685,21 +926,25 @@ class TimingStreamService : Service() {
       TimingServiceState.mutableState.value.copy(
         status = ConnectionStatus.Disconnected,
         isDemo = false,
+        replayDescription = null,
         selectedTrackId = null,
         supportsSectors = true,
         supportsGaps = true,
         error = null,
       )
-    stopForeground(STOP_FOREGROUND_REMOVE)
-    foreground = false
-    stopSelf()
+    scope.launch {
+      sessionRecorder.finish()
+      stopForeground(STOP_FOREGROUND_REMOVE)
+      foreground = false
+      stopSelf()
+    }
   }
 
   private fun streamNotification(state: TimingUiState): Notification =
     NotificationCompat.Builder(this, CHANNEL_ID)
       .setSmallIcon(android.R.drawable.stat_notify_sync)
       .setContentTitle(if (state.isDemo) "Lapbot demo replay" else "Lapbot live timing")
-      .setContentText(if (state.isDemo) "Replaying session 837888" else state.status.notificationText)
+      .setContentText(if (state.isDemo) state.replayDescription ?: "Replaying recorded timing" else state.status.notificationText)
       .setContentIntent(openAppIntent())
       .setOngoing(true)
       .setOnlyAlertOnce(true)
@@ -751,6 +996,7 @@ class TimingStreamService : Service() {
     const val ACTION_PLAY_TEST_TONES = "com.example.lapbot.action.PLAY_TEST_TONES"
     const val ACTION_PREVIEW_ANNOUNCEMENT = "com.example.lapbot.action.PREVIEW_ANNOUNCEMENT"
     const val ACTION_SET_LISTEN_FOR_COMMANDS = "com.example.lapbot.action.SET_LISTEN_FOR_COMMANDS"
+    const val ACTION_REPLAY_RECORDED_SESSION = "com.example.lapbot.action.REPLAY_RECORDED_SESSION"
     const val EXTRA_AUTO_RECONNECT = "autoReconnect"
     const val EXTRA_TAIL_LIMIT = "tailLimit"
     const val EXTRA_INITIAL_DELAY_MS = "initialDelayMs"
@@ -763,6 +1009,7 @@ class TimingStreamService : Service() {
     const val EXTRA_SECTOR_DURATION_MS = "sectorDurationMs"
     const val EXTRA_TRACK_ID = "trackId"
     const val EXTRA_LISTEN_FOR_COMMANDS = "listenForCommands"
+    const val EXTRA_RECORDED_SESSION_ID = "recordedSessionId"
     private const val DEFAULT_TAIL_LIMIT = 20
     private const val CHANNEL_ID = "live_timing"
     private const val NOTIFICATION_ID = 1001
@@ -771,6 +1018,7 @@ class TimingStreamService : Service() {
     private const val GAP_COHERENCE_DELAY_MS = 5_000L
     private const val COMMAND_ACK_DURATION_MS = 150
     private const val COMMAND_ACK_SPEECH_DELAY_MS = 220L
+    private const val RECORDED_REPLAY_LAP_DELAY_MS = 1_000L
   }
 }
 
@@ -778,15 +1026,50 @@ private data class PendingAnnouncement(
   val sections: List<String>,
   val lap: Int?,
   val stopServiceAfter: Boolean,
-  val queueMode: Int,
-)
-
-private data class UtteranceCompletion(
-  val lap: Int?,
-  val stopServiceAfter: Boolean,
+  val sectorSound: SectorSound?,
+  val preSpeechDelayMs: Long,
 )
 
 private data class SectorUpdateKey(val driverId: String, val lap: Int, val sector: Int)
+
+internal enum class CoachingDetailDirection {
+  More,
+  Less,
+}
+
+internal fun adjustCoachingDetail(
+  current: CoachingChattiness,
+  direction: CoachingDetailDirection,
+): CoachingChattiness =
+  when (direction) {
+    CoachingDetailDirection.More ->
+      when (current) {
+        CoachingChattiness.Low -> CoachingChattiness.Medium
+        CoachingChattiness.Medium,
+        CoachingChattiness.High,
+        -> CoachingChattiness.High
+      }
+    CoachingDetailDirection.Less ->
+      when (current) {
+        CoachingChattiness.High -> CoachingChattiness.Medium
+        CoachingChattiness.Medium,
+        CoachingChattiness.Low,
+        -> CoachingChattiness.Low
+      }
+  }
+
+internal fun formatCoachingDetailConfirmation(detail: CoachingChattiness): String =
+  "Coaching detail, ${if (detail == CoachingChattiness.Medium) "mid" else detail.name.lowercase()}"
+
+internal fun mediaVolumeStep(level: Int, maxVolume: Int): Int {
+  require(level in 0..10 && maxVolume > 0)
+  return if (level == 0) 0 else ((level * maxVolume + 5) / 10).coerceAtLeast(1)
+}
+
+internal fun mediaVolumeLevel(streamLevel: Int, maxVolume: Int): Int {
+  require(maxVolume > 0)
+  return ((streamLevel * 10 + maxVolume / 2) / maxVolume).coerceIn(0, 10)
+}
 
 internal fun formatGapVoiceCommandSections(state: TimingUiState): List<String> {
   if (state.status != ConnectionStatus.Connected) return listOf("Live timing is not connected")
@@ -804,6 +1087,23 @@ internal fun formatGapVoiceCommandSections(state: TimingUiState): List<String> {
       includeKartNumbers = state.announcementSettings.speakGapKartNumbers,
     )
   return sections.ifEmpty { listOf("Gaps are not available yet") }
+}
+
+internal fun formatRaceStatusVoiceCommandSections(state: TimingUiState): List<String> {
+  if (state.status != ConnectionStatus.Connected) return listOf("Live timing is not connected")
+  val selectedKartNumber = canonicalKartNumber(state.selectedKartNumber)
+    ?: return listOf("Pick a driver in focus first")
+  val selected =
+    state.rows.firstOrNull { canonicalKartNumber(it.number) == selectedKartNumber }
+      ?: return listOf("The driver in focus is not in the current session")
+  val position = selected.position ?: return listOf("Position is not available yet")
+  val sections = mutableListOf("Position P$position")
+  if (!state.supportsGaps) return sections + "Gap information is not available for this track"
+  val completedLap = selected.gapRecordedAtLap ?: selected.recentCompletedLap ?: selected.lap
+  val gaps = completedLap?.let { calculateAdjacentRaceGaps(state.rows, selected, it) }
+  sections += formatGapAnnouncementSections(gaps, includeKartNumbers = true)
+  if (sections.size == 1) sections += "Gaps are not available yet"
+  return sections
 }
 
 internal data class SectorDelta(val sector: Int, val sectorTimeMs: Long, val deltaMs: Long) {

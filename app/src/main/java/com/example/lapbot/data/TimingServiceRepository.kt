@@ -7,6 +7,10 @@ import com.example.lapbot.service.TimingStreamService
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
+internal const val TIMING_PREFERENCES_NAME = "announcements"
+internal const val PREF_COACHING_CHATTINESS = "coachingChattiness"
+internal const val PREF_SPEAK_SECTOR_DELTAS = "speakSectorDeltas"
+
 internal object TimingServiceState {
   val mutableState = MutableStateFlow(TimingUiState())
   var running: Boolean = false
@@ -14,7 +18,7 @@ internal object TimingServiceState {
 
 class TimingServiceRepository(context: Context) : TimingRepository {
   private val applicationContext = context.applicationContext
-  private val preferences = applicationContext.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+  private val preferences = applicationContext.getSharedPreferences(TIMING_PREFERENCES_NAME, Context.MODE_PRIVATE)
   override val state: StateFlow<TimingUiState> = TimingServiceState.mutableState
 
   init {
@@ -63,6 +67,7 @@ class TimingServiceRepository(context: Context) : TimingRepository {
         TimingServiceState.mutableState.value.copy(
           status = ConnectionStatus.Disconnected,
           isDemo = false,
+          replayDescription = null,
           selectedTrackId = null,
           supportsSectors = true,
           supportsGaps = true,
@@ -206,6 +211,14 @@ class TimingServiceRepository(context: Context) : TimingRepository {
     }
   }
 
+  fun replayRecordedSession(sessionId: String) {
+    ContextCompat.startForegroundService(
+      applicationContext,
+      serviceIntent(TimingStreamService.ACTION_REPLAY_RECORDED_SESSION)
+        .putExtra(TimingStreamService.EXTRA_RECORDED_SESSION_ID, sessionId),
+    )
+  }
+
   override fun close() = Unit
 
   private fun serviceIntent(action: String) =
@@ -235,7 +248,6 @@ class TimingServiceRepository(context: Context) : TimingRepository {
   }
 
   private companion object {
-    const val PREFERENCES_NAME = "announcements"
     const val PREF_AUTO_RECONNECT = "autoReconnect"
     const val PREF_COACH_ENABLED = "coachEnabled"
     const val PREF_LISTEN_FOR_COMMANDS = "listenForCommands"
@@ -245,10 +257,8 @@ class TimingServiceRepository(context: Context) : TimingRepository {
     const val PREF_SPEAK_BEST = "speakBestComparison"
     const val PREF_SPEAK_GAPS = "speakGaps"
     const val PREF_SPEAK_GAP_KART_NUMBERS = "speakGapKartNumbers"
-    const val PREF_SPEAK_SECTOR_DELTAS = "speakSectorDeltas"
     const val PREF_SECTOR_TONES_ENABLED = "sectorTonesEnabled"
     const val PREF_SPEAK_COACHING = "speakCoaching"
-    const val PREF_COACHING_CHATTINESS = "coachingChattiness"
     const val PREF_VOICE_GENDER = "voiceGender"
     const val PREF_SPEECH_RATE = "speechRate"
   }
